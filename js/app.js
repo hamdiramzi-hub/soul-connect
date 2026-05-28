@@ -15,6 +15,7 @@ import { fetchNatalChart, geocodePlace } from "./api-client.js";
 import {
   getMyProfile, saveMyProfile, getPreferences, savePreferences,
   getAllProfiles, getProfileById, toggleLike, getLikes, createProfileId,
+  syncProfilesFromServer, saveProfileToServer,
 } from "./store.js";
 
 const app = document.getElementById("app");
@@ -626,6 +627,9 @@ function finishWizard() {
     chineseElement: d.chineseElement,
   };
   saveMyProfile(profile);
+  saveProfileToServer(profile).then((saved) => {
+    if (!saved) console.info("Profile saved locally; server database unavailable.");
+  });
   savePreferences({
     zodiac: d.prefZodiac || [],
     hdType: d.prefHd || [],
@@ -734,4 +738,4 @@ document.querySelector(".logo")?.addEventListener("click", (e) => {
   navigate("home");
 });
 
-render();
+syncProfilesFromServer().finally(render);

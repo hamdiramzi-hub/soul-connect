@@ -4,6 +4,7 @@ const KEYS = {
   profile: "soulconnect_profile",
   prefs: "soulconnect_prefs",
   likes: "soulconnect_likes",
+  remoteProfiles: "soulconnect_remote_profiles",
 };
 
 function read(key, fallback) {
@@ -25,6 +26,33 @@ export function getMyProfile() {
 
 export function saveMyProfile(profile) {
   write(KEYS.profile, profile);
+}
+
+export async function syncProfilesFromServer() {
+  try {
+    const res = await fetch("/api/profiles");
+    if (!res.ok) return false;
+    const data = await res.json();
+    write(KEYS.remoteProfiles, data.profiles || []);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function saveProfileToServer(profile) {
+  try {
+    const res = await fetch("/api/profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(profile),
+    });
+    if (!res.ok) return false;
+    await syncProfilesFromServer();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function getPreferences() {
@@ -50,17 +78,21 @@ export function toggleLike(profileId) {
 
 export function getAllProfiles() {
   const mine = getMyProfile();
-  const list = [...DEMO_PROFILES];
-  if (mine?.id && !list.some((p) => p.id === mine.id)) {
-    list.unshift(mine);
-  }
+  const remoteProfiles = read(KEYS.remoteProfiles, []);
+  const byId = new Map();
+  [...DEMO_PROFILES, ...remoteProfiles].forEach((profile) => {
+    if (profile?.id) byId.set(profile.id, profile);
+  });
+  if (mine?.id) byId.set(mine.id, mine);
+  const list = [...byId.values()];
   return list.filter((p) => p.id !== mine?.id);
 }
 
 export function getProfileById(id) {
   const mine = getMyProfile();
   if (mine?.id === id) return mine;
-  return DEMO_PROFILES.find((p) => p.id === id) || null;
+  const remoteProfiles = read(KEYS.remoteProfiles, []);
+  return remoteProfiles.find((p) => p.id === id) || DEMO_PROFILES.find((p) => p.id === id) || null;
 }
 
 export function createProfileId() {

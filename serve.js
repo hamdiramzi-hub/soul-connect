@@ -4,6 +4,7 @@ const path = require("path");
 
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT) || 8765;
+const DATABASE_URL = process.env.DATABASE_URL;
 
 const MIME = {
   ".html": "text/html",
@@ -17,6 +18,32 @@ let astroModule = null;
 async function getAstro() {
   if (!astroModule) astroModule = await import("./js/astro-calc.js");
   return astroModule;
+}
+
+let dbPool = null;
+let dbReady = false;
+
+async function getDb() {
+  if (!DATABASE_URL) return null;
+  if (!dbPool) {
+    const { Pool } = require("pg");
+    dbPool = new Pool({
+      connectionString: DATABASE_URL,
+      ssl: DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
+    });
+  }
+  if (!dbReady) {
+    await dbPool.query(`
+      CREATE TABLE IF NOT EXISTS profiles (
+        id TEXT PRIMARY KEY,
+        data JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    dbReady = true;
+  }
+  return dbPool;
 }
 
 function readBody(req) {
@@ -37,6 +64,44 @@ function readBody(req) {
 function sendJson(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
+}
+
+async function handleProfiles(req, url) {
+  const db = await getDb();
+  if (!db) return { status: 503, body: { error: "DATABASE_URL is not configured" } };
+
+  if (url.pathname === "/api/profiles" && req.method === "GET") {
+    const { rows } = await db.query(
+      "SELECT data FROM profiles ORDER BY updated_at DESC LIMIT 200"
+    );
+    return { status: 200, body: { profiles: rows.map((row) => row.data) } };
+  }
+
+  if (url.pathname === "/api/profiles" && req.method === "POST") {
+    const raw = await readBody(req);
+    const profile = raw ? JSON.parse(raw) : {};
+    if (!profile.id || !profile.name) {
+      return { status: 400, body: { error: "Profile id and name are required" } };
+    }
+    await db.query(
+      `INSERT INTO profiles (id, data, updated_at)
+       VALUES ($1, $2::jsonb, NOW())
+       ON CONFLICT (id)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [profile.id, JSON.stringify(profile)]
+    );
+    return { status: 200, body: { profile } };
+  }
+
+  const match = url.pathname.match(/^\/api\/profiles\/([^/]+)$/);
+  if (match && req.method === "GET") {
+    const id = decodeURIComponent(match[1]);
+    const { rows } = await db.query("SELECT data FROM profiles WHERE id = $1", [id]);
+    if (!rows.length) return { status: 404, body: { error: "Profile not found" } };
+    return { status: 200, body: { profile: rows[0].data } };
+  }
+
+  return null;
 }
 
 async function handleGeocode(url) {
@@ -189,6 +254,15 @@ http
       }
     }
 
+    if (url.pathname === "/api/profiles" || url.pathname.startsWith("/api/profiles/")) {
+      try {
+        const out = await handleProfiles(req, url);
+        if (out) return sendJson(res, out.status, out.body);
+      } catch (e) {
+        return sendJson(res, 500, { error: e.message || "Profile API failed" });
+      }
+    }
+
     const filePath = url.pathname === "/" ? "/index.html" : url.pathname;
     const file = path.join(ROOT, path.normalize(filePath).replace(/^(\.\.(\/|\\|$))+/, ""));
     if (!file.startsWith(ROOT)) {
@@ -207,4 +281,5 @@ http
   .listen(PORT, () => {
     console.log(`Soul Connect → http://localhost:${PORT}`);
     console.log(`Astro API: POST /api/natal · GET /api/geocode?q=City`);
+    console.log(DATABASE_URL ? "Profile DB: PostgreSQL enabled" : "Profile DB: localStorage fallback");
   });
