@@ -1,10 +1,10 @@
 databases:
-  - name: soul-connect-db
+  - name: cosmic-dating-db
     plan: free
 
 services:
   - type: web
-    name: soul-connect
+    name: cosmic-dating
     runtime: node
     plan: free
     buildCommand: npm install
@@ -15,5 +15,5 @@ services:
         value: "20"
       - key: DATABASE_URL
         fromDatabase:
-          name: soul-connect-db
+          name: cosmic-dating-db
           property: connectionString

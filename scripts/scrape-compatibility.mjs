@@ -76,7 +76,7 @@ function blurbForPair(a, b, score) {
 
 async function fetchText(url) {
   const res = await fetch(url, {
-    headers: { "User-Agent": "SoulConnect/1.0 (compatibility research; +https://github.com)" },
+    headers: { "User-Agent": "CosmicDating/1.0 (compatibility research; +https://github.com)" },
   });
   if (!res.ok) throw new Error(`${url} → ${res.status}`);
   return res.text();

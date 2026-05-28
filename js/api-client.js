@@ -1,4 +1,4 @@
-/** Client calls to local Soul Connect astro API (no third-party scraping from the browser). */
+/** Client calls to local Cosmic Dating astro API (no third-party scraping from the browser). */
 
 export async function geocodePlace(query) {
   const res = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`);

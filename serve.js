@@ -110,7 +110,7 @@ async function handleGeocode(url) {
 
   const nomUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q.trim())}&format=json&limit=1`;
   const nomRes = await fetch(nomUrl, {
-    headers: { "User-Agent": "SoulConnect/1.0 (educational; localhost)" },
+    headers: { "User-Agent": "CosmicDating/1.0 (educational; localhost)" },
   });
   if (!nomRes.ok) return { status: 502, body: { error: "Geocoding service unavailable" } };
   const rows = await nomRes.json();
@@ -279,7 +279,7 @@ http
     });
   })
   .listen(PORT, () => {
-    console.log(`Soul Connect → http://localhost:${PORT}`);
+    console.log(`Cosmic Dating -> http://localhost:${PORT}`);
     console.log(`Astro API: POST /api/natal · GET /api/geocode?q=City`);
     console.log(DATABASE_URL ? "Profile DB: PostgreSQL enabled" : "Profile DB: localStorage fallback");
   });
