@@ -1,0 +1,173 @@
+#!/usr/bin/env node
+/**
+ * Scrapes public zodiac compatibility scores into data/zodiac-pair-compat.json
+ * Primary source: synastrychart.org full matrix (12×12, 144 cells)
+ * Run: npm run scrape:compat
+ */
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(__dirname, "..");
+const OUT = path.join(ROOT, "data", "zodiac-pair-compat.json");
+
+const SIGNS = [
+  "aries", "taurus", "gemini", "cancer", "leo", "virgo",
+  "libra", "scorpio", "sagittarius", "capricorn", "aquarius", "pisces",
+];
+
+const SOURCES = [
+  {
+    id: "synastrychart",
+    name: "SynastryChart.org",
+    url: "https://synastrychart.org/compatibility",
+    parse(html) {
+      const matrix = {};
+      const re = /compatibility\/([a-z]+)-([a-z]+)">(\d{1,3})</g;
+      let m;
+      while ((m = re.exec(html)) !== null) {
+        const [, a, b, score] = m;
+        if (!SIGNS.includes(a) || !SIGNS.includes(b)) continue;
+        if (!matrix[a]) matrix[a] = {};
+        matrix[a][b] = Number(score);
+      }
+      return matrix;
+    },
+  },
+];
+
+function symmetrize(matrix) {
+  for (const a of SIGNS) {
+    if (!matrix[a]) matrix[a] = {};
+    for (const b of SIGNS) {
+      const ab = matrix[a][b];
+      const ba = matrix[b]?.[a];
+      if (ab != null && ba == null) {
+        if (!matrix[b]) matrix[b] = {};
+        matrix[b][a] = ab;
+      } else if (ba != null && ab == null) {
+        matrix[a][b] = ba;
+      }
+    }
+  }
+  return matrix;
+}
+
+function levelForScore(n) {
+  if (n >= 75) return "excellent";
+  if (n >= 60) return "good";
+  if (n >= 45) return "moderate";
+  return "challenging";
+}
+
+function blurbForPair(a, b, score) {
+  const A = a.charAt(0).toUpperCase() + a.slice(1);
+  const B = b.charAt(0).toUpperCase() + b.slice(1);
+  const lvl = levelForScore(score);
+  const labels = {
+    excellent: "Excellent match — strong elemental harmony and natural rapport.",
+    good: "Good match — solid foundation with room to grow together.",
+    moderate: "Moderate match — differences can become growth with effort.",
+    challenging: "Challenging match — high tension; deep bonds need awareness.",
+  };
+  return `${A} & ${B}: ${score}% (${lvl}). ${labels[lvl]}`;
+}
+
+async function fetchText(url) {
+  const res = await fetch(url, {
+    headers: { "User-Agent": "SoulConnect/1.0 (compatibility research; +https://github.com)" },
+  });
+  if (!res.ok) throw new Error(`${url} → ${res.status}`);
+  return res.text();
+}
+
+async function scrapeBlurbs(matrix, limit = 20) {
+  const pairs = [];
+  for (const a of SIGNS) {
+    for (const b of SIGNS) {
+      if (a <= b) pairs.push([a, b]);
+    }
+  }
+  const blurbs = {};
+  const top = pairs
+    .map(([a, b]) => ({ a, b, score: matrix[a]?.[b] ?? 50 }))
+    .sort((x, y) => y.score - x.score)
+    .slice(0, limit);
+
+  for (const { a, b } of top) {
+    const key = `${a}:${b}`;
+    try {
+      const html = await fetchText(`https://synastrychart.org/compatibility/${a}-${b}`);
+      const meta = html.match(/<meta name="description" content="([^"]+)"/i);
+      if (meta?.[1]) blurbs[key] = meta[1].trim();
+      await new Promise((r) => setTimeout(r, 400));
+    } catch {
+      /* skip */
+    }
+  }
+  return blurbs;
+}
+
+async function main() {
+  const merged = {};
+  const meta = { sources: [], scrapedAt: new Date().toISOString() };
+
+  for (const src of SOURCES) {
+    console.log(`Fetching ${src.name}…`);
+    const html = await fetchText(src.url);
+    const matrix = src.parse(html);
+    const count = Object.values(matrix).reduce((n, row) => n + Object.keys(row).length, 0);
+    console.log(`  Parsed ${count} cells`);
+    if (count < 100) {
+      console.warn("  Warning: expected ~144 cells; matrix may be incomplete.");
+    }
+    meta.sources.push({ id: src.id, name: src.name, url: src.url, cells: count });
+    for (const a of SIGNS) {
+      if (!merged[a]) merged[a] = {};
+      Object.assign(merged[a], matrix[a] || {});
+    }
+  }
+  symmetrize(merged);
+  const fullCount = SIGNS.reduce((n, a) => n + SIGNS.filter((b) => merged[a]?.[b] != null).length, 0);
+  console.log(`  Full matrix: ${fullCount} cells`);
+
+  const blurbs = {};
+  for (const a of SIGNS) {
+    for (const b of SIGNS) {
+      const score = merged[a]?.[b];
+      if (score != null) blurbs[`${a}:${b}`] = blurbForPair(a, b, score);
+    }
+  }
+
+  let extraBlurbs = {};
+  if (process.argv.includes("--blurbs")) {
+    console.log("Fetching sample meta descriptions (top pairs)…");
+    extraBlurbs = await scrapeBlurbs(merged, 24);
+  }
+
+  const payload = {
+    ...meta,
+    signs: SIGNS,
+    matrix: merged,
+    blurbs,
+    pageBlurbs: extraBlurbs,
+    levels: { excellent: 75, good: 60, moderate: 45, challenging: 0 },
+  };
+
+  fs.mkdirSync(path.dirname(OUT), { recursive: true });
+  fs.writeFileSync(OUT, JSON.stringify(payload, null, 2));
+
+  const bundlePath = path.join(ROOT, "js", "zodiac-compat-bundle.js");
+  fs.writeFileSync(
+    bundlePath,
+    `/** Auto-generated by npm run scrape:compat — do not edit */\nexport default ${JSON.stringify(payload)};\n`
+  );
+  console.log(`Wrote ${OUT}`);
+  console.log(`Wrote ${bundlePath}`);
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

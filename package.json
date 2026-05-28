@@ -1,0 +1,14 @@
+{
+  "name": "soul-connect",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node serve.js",
+    "scrape:compat": "node scripts/scrape-compatibility.mjs",
+    "scrape:compat:blurbs": "node scripts/scrape-compatibility.mjs --blurbs"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=18"
+  }
+}
