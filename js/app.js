@@ -17,6 +17,7 @@ import {
   getAllProfiles, getProfileById, toggleLike, getLikes, createProfileId,
   syncProfilesFromServer, saveProfileToServer,
 } from "./store.js";
+import { applyLanguage, initLanguageSwitcher, translatePage } from "./i18n.js";
 
 const app = document.getElementById("app");
 const mainNav = document.getElementById("main-nav");
@@ -707,6 +708,8 @@ function render() {
       renderHome();
   }
   bindGlobalNav();
+  applyLanguage();
+  translatePage(document.body);
 }
 
 function bindGlobalNav() {
@@ -738,4 +741,5 @@ document.querySelector(".logo")?.addEventListener("click", (e) => {
   navigate("home");
 });
 
+initLanguageSwitcher(render);
 syncProfilesFromServer().finally(render);
