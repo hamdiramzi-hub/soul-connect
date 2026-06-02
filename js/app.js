@@ -742,4 +742,7 @@ document.querySelector(".logo")?.addEventListener("click", (e) => {
 });
 
 initLanguageSwitcher(render);
-syncProfilesFromServer().finally(render);
+render();
+syncProfilesFromServer().then((synced) => {
+  if (synced) render();
+});

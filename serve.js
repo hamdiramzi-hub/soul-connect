@@ -7,10 +7,10 @@ const PORT = Number(process.env.PORT) || 8765;
 const DATABASE_URL = process.env.DATABASE_URL;
 
 const MIME = {
-  ".html": "text/html",
-  ".css": "text/css",
-  ".js": "text/javascript",
-  ".json": "application/json",
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
 };
 
@@ -274,7 +274,12 @@ http
         res.writeHead(404);
         return res.end("Not found");
       }
-      res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream" });
+      res.writeHead(200, {
+        "Content-Type": MIME[path.extname(file)] || "application/octet-stream",
+        "Cache-Control": file.endsWith(".html")
+          ? "no-cache"
+          : "public, max-age=300",
+      });
       res.end(data);
     });
   })

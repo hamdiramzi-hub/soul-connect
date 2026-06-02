@@ -29,14 +29,18 @@ export function saveMyProfile(profile) {
 }
 
 export async function syncProfilesFromServer() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4500);
   try {
-    const res = await fetch("/api/profiles");
+    const res = await fetch("/api/profiles", { signal: controller.signal });
     if (!res.ok) return false;
     const data = await res.json();
     write(KEYS.remoteProfiles, data.profiles || []);
     return true;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
