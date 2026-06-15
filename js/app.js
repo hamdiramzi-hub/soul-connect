@@ -752,8 +752,14 @@ function renderCreate() {
     const countriesHtml = countries
       .map((country) => `<option value="${esc(country)}"${d.birthCountry === country ? " selected" : ""}>${esc(country)}</option>`)
       .join("");
-    const cities = currentBirthCities(d.birthCountry, d.birthCity || "");
-    const cityOptionsHtml = cities.map((city) => `<option value="${esc(city)}">`).join("");
+    const cities = currentBirthCities(d.birthCountry);
+    const selectedCityMissing = d.birthCity && d.birthCity !== OTHER_CITY_VALUE && !cities.includes(d.birthCity);
+    const cityOptionsHtml = [
+      '<option value="">Select city...</option>',
+      ...cities.map((city) => `<option value="${esc(city)}"${d.birthCity === city ? " selected" : ""}>${esc(city)}</option>`),
+      ...(selectedCityMissing ? [`<option value="${esc(d.birthCity)}" selected>${esc(d.birthCity)}</option>`] : []),
+      `<option value="${OTHER_CITY_VALUE}"${d.birthCity === OTHER_CITY_VALUE ? " selected" : ""}>Other city...</option>`,
+    ].join("");
     const cityLoading = Boolean(d.birthCountry) && (
       birthLocationState.cityLoadingCountry === d.birthCountry ||
       birthLocationState.cityLoadingCountry.startsWith(`${d.birthCountry}::`)
@@ -793,9 +799,13 @@ function renderCreate() {
       <div class="form-row">
         <div class="form-group">
           <label for="birthCity">City of birth</label>
-          <input id="birthCity" name="birthCity" list="birthCityOptions" value="${esc(d.birthCity || "")}" placeholder="Type at least 2 letters to search cities" ${d.birthCountry ? "" : "disabled"} required />
-          <datalist id="birthCityOptions">${cityOptionsHtml}</datalist>
-          <p style="font-size:0.72rem;color:var(--text-muted);margin-top:0.25rem">${cityLoading ? "Loading cities..." : "Type to search. You can enter any city name."}</p>
+          <select id="birthCity" name="birthCity" ${d.birthCountry && !cityLoading ? "" : "disabled"} required>
+            ${cityLoading ? '<option value="">Loading cities...</option>' : cityOptionsHtml}
+          </select>
+        </div>
+        <div class="form-group${d.birthCity === OTHER_CITY_VALUE ? "" : " hidden"}" id="birth-city-other-wrap">
+          <label for="birthCityOther">Other birth city</label>
+          <input id="birthCityOther" name="birthCityOther" value="${esc(d.birthCityOther || "")}" placeholder="Type your birth city" />
         </div>
       </div>
       ${locationStatus ? `<p style="font-size:0.76rem;color:var(--text-muted);margin:-0.4rem 0 0.75rem">${esc(locationStatus)}</p>` : ""}
@@ -949,7 +959,7 @@ function clearCalculatedBirthFields() {
 function bindBirthLocationSelectors() {
   const country = document.getElementById("birthCountry");
   const city = document.getElementById("birthCity");
-  let citySearchTimer;
+  const cityOther = document.getElementById("birthCityOther");
   country?.addEventListener("change", () => {
     collectWizardForm();
     wizardDraft.birthCountry = country.value;
@@ -958,22 +968,17 @@ function bindBirthLocationSelectors() {
     clearCalculatedBirthFields();
     renderCreate();
   });
-  city?.addEventListener("input", () => {
-    clearTimeout(citySearchTimer);
-    wizardDraft.birthCity = city.value;
-    if (!wizardDraft.birthCountry) return;
-    const q = city.value.trim();
-    if (q.length >= 2) {
-      const cacheKey = `${wizardDraft.birthCountry}::${q.toLowerCase()}`;
-      birthLocationState.cityLoads.delete(cacheKey);
-      citySearchTimer = setTimeout(() => loadBirthCities(wizardDraft.birthCountry, q), 250);
-    }
-  });
   city?.addEventListener("change", () => {
     collectWizardForm();
     wizardDraft.birthCity = city.value;
+    if (city.value !== OTHER_CITY_VALUE) wizardDraft.birthCityOther = "";
     clearCalculatedBirthFields();
-    rerenderCreateCosmicStep();
+    renderCreate();
+  });
+  cityOther?.addEventListener("change", () => {
+    collectWizardForm();
+    clearCalculatedBirthFields();
+    renderCreate();
   });
 }
 

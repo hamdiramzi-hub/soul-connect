@@ -224,7 +224,8 @@ async function handleCities(url) {
   const country = url.searchParams.get("country")?.trim();
   if (!country) return { status: 400, body: { error: "Missing country parameter", cities: [] } };
   const query = url.searchParams.get("q")?.trim().toLowerCase() || "";
-  const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 200), 1), 500);
+  const defaultLimit = query ? 500 : 30000;
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || defaultLimit), 1), 30000);
   const locations = await fetchLocationIndex({ allowStale: true });
   const matchedCountry = locations.countries.find((item) => item.toLowerCase() === country.toLowerCase());
   let cities = matchedCountry ? locations.citiesByCountry.get(matchedCountry) || [] : [];
