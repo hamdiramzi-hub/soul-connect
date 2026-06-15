@@ -9,6 +9,24 @@ export async function geocodePlace(query) {
   return res.json();
 }
 
+export async function fetchCountries() {
+  const res = await fetch("/api/countries");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Could not load countries");
+  }
+  return res.json();
+}
+
+export async function fetchCities(country) {
+  const res = await fetch(`/api/cities?country=${encodeURIComponent(country)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Could not load cities");
+  }
+  return res.json();
+}
+
 export async function fetchNatalChart({ birthDate, birthTime, latitude, longitude, utcOffsetMinutes, birthPlace }) {
   const res = await fetch("/api/natal", {
     method: "POST",

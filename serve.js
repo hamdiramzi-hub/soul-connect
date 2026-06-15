@@ -13,9 +13,11 @@ const BODYGRAPHCHART_EMBED_ID = process.env.ZEN_FEMME_HD_EMBED_ID || process.env
 const BODYGRAPHCHART_EMBED_TOKEN = process.env.ZEN_FEMME_HD_EMBED_TOKEN || process.env.BODYGRAPHCHART_EMBED_TOKEN || "bd31ba1b-5ce9-4035-960b-889eef3825e2";
 const BODYGRAPHCHART_GENERATE_URL = `https://embed.bodygraphchart.com/v1/${BODYGRAPHCHART_EMBED_ID}/generate`;
 const BODYGRAPHCHART_LOCATIONS_URL = "https://app.bodygraphchart.com/locations/cities";
+const COUNTRIES_NOW_URL = "https://countriesnow.space/api/v0.1/countries";
 const HD_REQUEST_TIMEOUT_MS = 10000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+const LOCATION_CACHE_TTL_MS = 7 * DAY_MS;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -76,6 +78,7 @@ const CHINESE_ANIMALS_ORDER = [
   "horse", "goat", "monkey", "rooster", "dog", "pig",
 ];
 const CHINESE_ELEMENTS = ["Wood", "Fire", "Earth", "Metal", "Water"];
+let locationCache = null;
 
 function chineseAnimalFromLunarYear(year) {
   if (!Number.isFinite(year)) return null;
@@ -130,6 +133,110 @@ function readBody(req) {
 function sendJson(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(data));
+}
+
+function sortUniqueStrings(values) {
+  return [...new Set((values || [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function normalizeCountryCityRows(rows) {
+  const citiesByCountry = new Map();
+  for (const row of rows || []) {
+    const country = String(row?.country || row?.name || "").trim();
+    if (!country) continue;
+    citiesByCountry.set(country, sortUniqueStrings(row.cities || []));
+  }
+  return {
+    countries: sortUniqueStrings([...citiesByCountry.keys()]),
+    citiesByCountry,
+  };
+}
+
+function fallbackLocationRows() {
+  try {
+    const source = fs.readFileSync(path.join(ROOT, "js", "locations.js"), "utf8");
+    const rows = [];
+    const blockPattern = /country:\s*"([^"]+)"[\s\S]*?cities:\s*\[([\s\S]*?)\]/g;
+    let block;
+    while ((block = blockPattern.exec(source))) {
+      const cities = [];
+      const cityPattern = /"([^"]+)"/g;
+      let city;
+      while ((city = cityPattern.exec(block[2]))) cities.push(city[1]);
+      rows.push({ country: block[1], cities });
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+async function fetchLocationIndex({ allowStale = false } = {}) {
+  const now = Date.now();
+  if (locationCache && now - locationCache.at < LOCATION_CACHE_TTL_MS) return locationCache.value;
+
+  const fallback = normalizeCountryCityRows(fallbackLocationRows());
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(COUNTRIES_NOW_URL, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Countries source returned ${res.status}`);
+    const payload = await res.json();
+    const normalized = normalizeCountryCityRows(payload?.data || []);
+    if (!normalized.countries.length) throw new Error("Countries source returned no countries");
+    const value = { ...normalized, source: "countriesnow.space", fallback: false };
+    locationCache = { at: now, value };
+    return value;
+  } catch (e) {
+    if (allowStale && locationCache?.value) return { ...locationCache.value, stale: true };
+    return {
+      ...fallback,
+      source: "local fallback",
+      fallback: true,
+      warning: e.message || "Country/city source unavailable",
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function handleCountries() {
+  const locations = await fetchLocationIndex({ allowStale: true });
+  return {
+    status: 200,
+    body: {
+      countries: locations.countries,
+      source: locations.source,
+      fallback: Boolean(locations.fallback),
+      stale: Boolean(locations.stale),
+      warning: locations.warning,
+    },
+  };
+}
+
+async function handleCities(url) {
+  const country = url.searchParams.get("country")?.trim();
+  if (!country) return { status: 400, body: { error: "Missing country parameter", cities: [] } };
+  const locations = await fetchLocationIndex({ allowStale: true });
+  const matchedCountry = locations.countries.find((item) => item.toLowerCase() === country.toLowerCase());
+  const cities = matchedCountry ? locations.citiesByCountry.get(matchedCountry) || [] : [];
+  return {
+    status: 200,
+    body: {
+      country: matchedCountry || country,
+      cities,
+      source: locations.source,
+      fallback: Boolean(locations.fallback),
+      stale: Boolean(locations.stale),
+      warning: locations.warning,
+    },
+  };
 }
 
 function decodeHtml(value = "") {
@@ -600,7 +707,7 @@ async function calculateHumanDesignViaZenFemme({
     return {
       ok: false,
       source,
-      message: "Human Design was not guessed. Birth date or time was invalid for chart generation.",
+      message: "Human Design could not be calculated from the verified Zen Femme source because the birth date or time was invalid. No value was guessed.",
     };
   }
 
@@ -614,7 +721,7 @@ async function calculateHumanDesignViaZenFemme({
     return {
       ok: false,
       source,
-      message: "Human Design was not guessed. Could not resolve birth place timezone and coordinates for the Zen Femme chart source.",
+      message: "Human Design could not be calculated from the verified Zen Femme source because the birth place timezone and coordinates could not be resolved. No value was guessed.",
     };
   }
 
@@ -662,8 +769,8 @@ async function calculateHumanDesignViaZenFemme({
     };
   } catch (e) {
     const message = e.name === "AbortError"
-      ? "Human Design calculation timed out contacting the Zen Femme chart source."
-      : (e.message || "Human Design calculation failed via Zen Femme; no value was guessed.");
+      ? "Human Design could not be calculated from the verified Zen Femme source because the request timed out. No value was guessed."
+      : "Human Design could not be calculated from the verified Zen Femme source. No value was guessed.";
     return { ok: false, source, message };
   } finally {
     clearTimeout(timeout);
@@ -671,12 +778,12 @@ async function calculateHumanDesignViaZenFemme({
 }
 
 async function calculateHumanDesignViaApi({ birthDate, birthTime, birthPlace, latitude, longitude }) {
-  const source = "Human Design API";
+  const source = "Zen Femme free chart";
   if (!HUMAN_DESIGN_API_KEY) {
     return {
       ok: false,
       source,
-      message: "Human Design API is not configured.",
+      message: "Human Design could not be calculated from the verified Zen Femme source. No value was guessed.",
     };
   }
 
@@ -704,7 +811,7 @@ async function calculateHumanDesignViaApi({ birthDate, birthTime, birthPlace, la
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`Human Design source returned ${res.status}`);
+    if (!res.ok) throw new Error(`Fallback source returned ${res.status}`);
     const parsed = normalizeHumanDesignApiPayload(await res.json());
     if (!parsed.type && !parsed.authority && !parsed.profile) {
       throw new Error("Human Design response did not include chart properties");
@@ -714,7 +821,7 @@ async function calculateHumanDesignViaApi({ birthDate, birthTime, birthPlace, la
     return {
       ok: false,
       source,
-      message: e.message || "Human Design calculation failed; no value was guessed.",
+      message: "Human Design could not be calculated from the verified Zen Femme source. No value was guessed.",
     };
   } finally {
     clearTimeout(timeout);
@@ -731,7 +838,7 @@ async function calculateHumanDesign(args) {
     return {
       ok: false,
       source: zen.source,
-      message: `${zen.message} Fallback Human Design API also failed.`,
+      message: "Human Design could not be calculated from the verified Zen Femme source. No value was guessed.",
     };
   }
 
@@ -828,6 +935,24 @@ http
       }
     }
 
+    if (url.pathname === "/api/countries" && req.method === "GET") {
+      try {
+        const out = await handleCountries();
+        return sendJson(res, out.status, out.body);
+      } catch (e) {
+        return sendJson(res, 500, { error: e.message || "Countries failed", countries: [] });
+      }
+    }
+
+    if (url.pathname === "/api/cities" && req.method === "GET") {
+      try {
+        const out = await handleCities(url);
+        return sendJson(res, out.status, out.body);
+      } catch (e) {
+        return sendJson(res, 500, { error: e.message || "Cities failed", cities: [] });
+      }
+    }
+
     if (url.pathname === "/api/natal" && req.method === "POST") {
       try {
         const raw = await readBody(req);
@@ -868,17 +993,19 @@ http
         res.writeHead(404);
         return res.end("Not found");
       }
+      const ext = path.extname(file);
+      const cacheControl = file.endsWith(".html") || [".js", ".css"].includes(ext)
+        ? "no-cache, no-store, must-revalidate"
+        : "public, max-age=300";
       res.writeHead(200, {
         "Content-Type": MIME[path.extname(file)] || "application/octet-stream",
-        "Cache-Control": file.endsWith(".html")
-          ? "no-cache"
-          : "public, max-age=300",
+        "Cache-Control": cacheControl,
       });
       res.end(data);
     });
   })
   .listen(PORT, () => {
     console.log(`Cosmic Dating -> http://localhost:${PORT}`);
-    console.log(`Astro API: POST /api/natal · GET /api/geocode?q=City · GET /api/today`);
+    console.log(`Astro API: POST /api/natal · GET /api/geocode?q=City · GET /api/today · GET /api/countries · GET /api/cities?country=Country`);
     console.log(DATABASE_URL ? "Profile DB: PostgreSQL enabled" : "Profile DB: localStorage fallback");
   });

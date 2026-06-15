@@ -11,7 +11,7 @@ import {
   topWesternMatches, topChineseMatches, zodiacPairScore,
 } from "./compatibility-matrix.js";
 import { compatibilitySources } from "./compatibility-data.js";
-import { fetchNatalChart, fetchTodayInsights } from "./api-client.js";
+import { fetchCities, fetchCountries, fetchNatalChart, fetchTodayInsights } from "./api-client.js";
 import { BIRTH_LOCATIONS, getCitiesForCountry } from "./locations.js";
 import {
   getMyProfile, saveMyProfile, getPreferences, savePreferences,
@@ -28,8 +28,86 @@ let wizardStep = 0;
 let wizardDraft = {};
 let viewProfileId = null;
 let todayRequestId = 0;
+let locationRequestId = 0;
 
 const WIZARD_STEPS = ["Basics", "Cosmic self", "Preferences"];
+const OTHER_CITY_VALUE = "__other__";
+const LOCAL_COUNTRIES = BIRTH_LOCATIONS.map((item) => item.country);
+const birthLocationState = {
+  countries: LOCAL_COUNTRIES,
+  countriesLoaded: false,
+  countriesLoading: false,
+  countriesError: "",
+  citiesByCountry: new Map(BIRTH_LOCATIONS.map((item) => [item.country, item.cities])),
+  cityLoads: new Set(),
+  cityLoadingCountry: "",
+  cityErrors: new Map(),
+};
+
+function sortUniqueStrings(values) {
+  return [...new Set((values || [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function currentBirthCountries() {
+  return sortUniqueStrings([...LOCAL_COUNTRIES, ...birthLocationState.countries]);
+}
+
+function currentBirthCities(country) {
+  if (!country) return [];
+  const loaded = birthLocationState.citiesByCountry.get(country);
+  return loaded?.length ? loaded : getCitiesForCountry(country);
+}
+
+function isCreateCosmicStep() {
+  return route === "create" && wizardStep === 1;
+}
+
+function rerenderCreateCosmicStep() {
+  if (isCreateCosmicStep()) renderCreate();
+}
+
+async function loadBirthCountries() {
+  if (birthLocationState.countriesLoaded || birthLocationState.countriesLoading) return;
+  birthLocationState.countriesLoading = true;
+  birthLocationState.countriesError = "";
+  const requestId = ++locationRequestId;
+  try {
+    const data = await fetchCountries();
+    if (requestId !== locationRequestId) return;
+    birthLocationState.countries = currentBirthCountries().concat(data.countries || []);
+    birthLocationState.countriesLoaded = true;
+  } catch (e) {
+    birthLocationState.countriesError = e.message || "Using local country list.";
+    birthLocationState.countriesLoaded = true;
+  } finally {
+    birthLocationState.countriesLoading = false;
+    rerenderCreateCosmicStep();
+  }
+}
+
+async function loadBirthCities(country) {
+  if (!country || birthLocationState.cityLoads.has(country) || birthLocationState.cityLoadingCountry === country) return;
+  birthLocationState.cityLoadingCountry = country;
+  birthLocationState.cityErrors.delete(country);
+  try {
+    const data = await fetchCities(country);
+    const resolvedCountry = data.country || country;
+    birthLocationState.citiesByCountry.set(resolvedCountry, sortUniqueStrings(data.cities || []));
+    if (resolvedCountry !== country) {
+      birthLocationState.citiesByCountry.set(country, birthLocationState.citiesByCountry.get(resolvedCountry) || []);
+    }
+    birthLocationState.cityLoads.add(country);
+  } catch (e) {
+    birthLocationState.cityErrors.set(country, e.message || "Using local city list.");
+    birthLocationState.cityLoads.add(country);
+  } finally {
+    if (birthLocationState.cityLoadingCountry === country) birthLocationState.cityLoadingCountry = "";
+    rerenderCreateCosmicStep();
+  }
+}
 
 function calculateAge(birthDate, birthTime = "00:00") {
   if (!birthDate) return null;
@@ -61,7 +139,7 @@ function hasCalculatedChart(d) {
 }
 
 function buildBirthPlace(d) {
-  const city = d.birthCity === "__other__" ? d.birthCityOther : d.birthCity;
+  const city = d.birthCity === OTHER_CITY_VALUE ? d.birthCityOther : d.birthCity;
   if (!city || !d.birthCountry) return "";
   return `${city}, ${d.birthCountry}`;
 }
@@ -87,7 +165,7 @@ function hydrateBirthLocation(d) {
   return {
     ...d,
     birthCountry: matched.country,
-    birthCity: matchedCity || "__other__",
+    birthCity: matchedCity || OTHER_CITY_VALUE,
     birthCityOther: matchedCity ? "" : cityCandidate,
   };
 }
@@ -249,13 +327,23 @@ function isLegacyHumanDesignApiFailure(p) {
   return !p?.hdType && /Human Design API|HUMAN_DESIGN_API_KEY/i.test(`${source} ${status}`);
 }
 
+function sanitizedHumanDesignSource(source) {
+  return /Human Design API|HUMAN_DESIGN_API_KEY/i.test(String(source || "")) ? "Zen Femme free chart" : source;
+}
+
+function sanitizedHumanDesignStatus(status) {
+  return /Human Design API|HUMAN_DESIGN_API_KEY/i.test(String(status || ""))
+    ? LEGACY_HD_RECALC_PROMPT
+    : status;
+}
+
 function humanDesignDisplay(p) {
   const hd = getHdTypeById(p?.hdType);
   const legacyApiFailure = isLegacyHumanDesignApiFailure(p);
-  const source = legacyApiFailure ? "" : (p?.humanDesignSource || p?.hdSource || "");
+  const source = legacyApiFailure ? "" : sanitizedHumanDesignSource(p?.humanDesignSource || p?.hdSource || "");
   const status = legacyApiFailure
     ? LEGACY_HD_RECALC_PROMPT
-    : (p?.hdCalculationStatus || "Human Design requires a verified calculation source. It will stay blank until one is available.");
+    : sanitizedHumanDesignStatus(p?.hdCalculationStatus || "Human Design requires the Zen Femme free chart source. It will stay blank until it can be calculated from verified birth data.");
   const details = [p?.hdAuthority, p?.hdProfile].filter(Boolean).join(" · ");
   return { hd, source, status, details };
 }
@@ -624,16 +712,25 @@ function renderCreate() {
     const moon = getZodiacById(d.moonSign);
     const rising = getZodiacById(d.risingSign);
     const chinese = getChineseById(d.chineseAnimal);
-    const countriesHtml = BIRTH_LOCATIONS
-      .map((item) => `<option value="${esc(item.country)}"${d.birthCountry === item.country ? " selected" : ""}>${esc(item.country)}</option>`)
+    const countries = sortUniqueStrings([...currentBirthCountries(), d.birthCountry].filter(Boolean));
+    const countriesHtml = countries
+      .map((country) => `<option value="${esc(country)}"${d.birthCountry === country ? " selected" : ""}>${esc(country)}</option>`)
       .join("");
-    const cities = getCitiesForCountry(d.birthCountry);
+    const cities = currentBirthCities(d.birthCountry);
+    const selectedCityMissing = d.birthCity && d.birthCity !== OTHER_CITY_VALUE && !cities.includes(d.birthCity);
     const cityOptionsHtml = [
       '<option value="">Select city...</option>',
+      ...(birthLocationState.cityLoadingCountry === d.birthCountry ? ['<option value="" disabled>Loading cities...</option>'] : []),
       ...cities.map((city) => `<option value="${esc(city)}"${d.birthCity === city ? " selected" : ""}>${esc(city)}</option>`),
-      `<option value="__other__"${d.birthCity === "__other__" ? " selected" : ""}>Other city...</option>`,
+      ...(selectedCityMissing ? [`<option value="${esc(d.birthCity)}" selected>${esc(d.birthCity)}</option>`] : []),
+      `<option value="${OTHER_CITY_VALUE}"${d.birthCity === OTHER_CITY_VALUE ? " selected" : ""}>Other city...</option>`,
     ].join("");
     const selectedBirthPlace = buildBirthPlace(d);
+    const locationStatus = [
+      birthLocationState.countriesLoading && "Loading all countries...",
+      birthLocationState.countriesError && "Using the local country fallback for now.",
+      birthLocationState.cityErrors.get(d.birthCountry) && "City list unavailable for this country; choose Other city if needed.",
+    ].filter(Boolean).join(" ");
     const chartHint = hasCalculatedChart(d)
       ? `Calculated from birth data: ☉ ${sun?.name || d.sunSign}${moon ? ` · ☽ ${moon.name}` : ""}${rising ? ` · ↑ ${rising.name}` : ""}`
       : "Enter birth date, exact time, and place, then calculate. The app will not guess your signs.";
@@ -667,11 +764,12 @@ function renderCreate() {
             ${cityOptionsHtml}
           </select>
         </div>
-        <div class="form-group${d.birthCity === "__other__" ? "" : " hidden"}" id="birth-city-other-wrap">
+        <div class="form-group${d.birthCity === OTHER_CITY_VALUE ? "" : " hidden"}" id="birth-city-other-wrap">
           <label for="birthCityOther">Other birth city</label>
           <input id="birthCityOther" name="birthCityOther" value="${esc(d.birthCityOther || "")}" placeholder="Type your birth city" />
         </div>
       </div>
+      ${locationStatus ? `<p style="font-size:0.76rem;color:var(--text-muted);margin:-0.4rem 0 0.75rem">${esc(locationStatus)}</p>` : ""}
       <p style="font-size:0.78rem;color:var(--text-muted);margin:-0.25rem 0 1rem">
         Selected birth place: ${selectedBirthPlace ? esc(selectedBirthPlace) : "Choose country and city"}
       </p>
@@ -743,6 +841,8 @@ function renderCreate() {
   if (wizardStep === 1) {
     bindBirthLocationSelectors();
     bindChartCalculator();
+    loadBirthCountries();
+    if (d.birthCountry) loadBirthCities(d.birthCountry);
   }
   document.getElementById("wizard-back")?.addEventListener("click", () => {
     collectWizardForm();
@@ -778,6 +878,9 @@ function collectWizardForm() {
   wizardDraft.lookingFor = getChipValues("lookingFor");
   wizardDraft.interests = getChipValues("interests");
   if (wizardStep === 1) {
+    ["birthDate", "birthTime", "birthCountry", "birthCity", "birthCityOther", "birthPlace", "birthLatitude", "birthLongitude", "utcOffsetMinutes"].forEach((key) => {
+      wizardDraft[key] = fd.get(key) || "";
+    });
     wizardDraft.birthPlace = buildBirthPlace(wizardDraft);
     if (wizardDraft.birthDate !== wizardDraft._calculatedBirthDate ||
       wizardDraft.birthTime !== wizardDraft._calculatedBirthTime ||
@@ -829,7 +932,7 @@ function bindBirthLocationSelectors() {
   city?.addEventListener("change", () => {
     collectWizardForm();
     wizardDraft.birthCity = city.value;
-    if (city.value !== "__other__") wizardDraft.birthCityOther = "";
+    if (city.value !== OTHER_CITY_VALUE) wizardDraft.birthCityOther = "";
     clearCalculatedBirthFields();
     renderCreate();
   });
@@ -890,7 +993,7 @@ async function bindChartCalculator() {
         delete wizardDraft.hdType;
         delete wizardDraft.hdAuthority;
         delete wizardDraft.hdProfile;
-        wizardDraft.hdCalculationStatus = chart.humanDesign?.message || "No verified Human Design calculation source is configured.";
+        wizardDraft.hdCalculationStatus = chart.humanDesign?.message || "Human Design could not be calculated from the verified Zen Femme source. No value was guessed.";
       }
       const parts = [
         chart.sunSign && `☉ ${getZodiacById(chart.sunSign)?.name}`,
