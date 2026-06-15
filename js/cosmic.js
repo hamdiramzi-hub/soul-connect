@@ -55,12 +55,33 @@ export function deriveCosmicFromBirthDate(dateStr) {
 /** Merge API natal chart into profile fields */
 export function applyNatalChart(profile, chart) {
   if (!chart) return profile;
+  const humanDesign = chart.humanDesign;
+  const humanDesignFields = humanDesign?.ok
+    ? {
+        hdType: humanDesign.type || profile.hdType,
+        hdAuthority: humanDesign.authority || profile.hdAuthority,
+        hdProfile: humanDesign.profile || profile.hdProfile,
+        humanDesignSource: humanDesign.source || "Zen Femme free chart",
+        hdCalculationStatus: undefined,
+      }
+    : humanDesign
+      ? {
+          hdType: undefined,
+          hdAuthority: undefined,
+          hdProfile: undefined,
+          humanDesignSource: humanDesign.source || profile.humanDesignSource,
+          hdCalculationStatus: humanDesign.message || profile.hdCalculationStatus,
+        }
+      : {};
   return {
     ...profile,
     zodiac: chart.sunSign || profile.zodiac,
     sunSign: chart.sunSign,
     moonSign: chart.moonSign,
     risingSign: chart.risingSign,
+    chineseAnimal: chart.chineseAnimal || profile.chineseAnimal,
+    chineseElement: chart.chineseElement || profile.chineseElement,
+    ...humanDesignFields,
     birthLatitude: chart.latitude ?? profile.birthLatitude,
     birthLongitude: chart.longitude ?? profile.birthLongitude,
     utcOffsetMinutes: chart.utcOffsetMinutes ?? profile.utcOffsetMinutes,

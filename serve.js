@@ -6,6 +6,14 @@ const ROOT = __dirname;
 const PORT = Number(process.env.PORT) || 8765;
 const DATABASE_URL = process.env.DATABASE_URL;
 const USER_AGENT = "CosmicDating/1.0 (+https://soul-connect-b95n.onrender.com)";
+const HUMAN_DESIGN_API_KEY = process.env.HUMAN_DESIGN_API_KEY || process.env.HUMANDESIGN_API_KEY;
+const HUMAN_DESIGN_GEOCODE_KEY = process.env.HUMAN_DESIGN_GEOCODE_KEY || process.env.HUMANDESIGN_GEOCODE_KEY;
+const ZEN_FEMME_CHART_URL = "https://thezenfemme.com/free-chart";
+const BODYGRAPHCHART_EMBED_ID = process.env.ZEN_FEMME_HD_EMBED_ID || process.env.BODYGRAPHCHART_EMBED_ID || "485";
+const BODYGRAPHCHART_EMBED_TOKEN = process.env.ZEN_FEMME_HD_EMBED_TOKEN || process.env.BODYGRAPHCHART_EMBED_TOKEN || "bd31ba1b-5ce9-4035-960b-889eef3825e2";
+const BODYGRAPHCHART_GENERATE_URL = `https://embed.bodygraphchart.com/v1/${BODYGRAPHCHART_EMBED_ID}/generate`;
+const BODYGRAPHCHART_LOCATIONS_URL = "https://app.bodygraphchart.com/locations/cities";
+const HD_REQUEST_TIMEOUT_MS = 10000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -21,6 +29,12 @@ let astroModule = null;
 async function getAstro() {
   if (!astroModule) astroModule = await import("./js/astro-calc.js");
   return astroModule;
+}
+
+let lunarModule = null;
+async function getLunar() {
+  if (!lunarModule) lunarModule = await import("./js/lunar-years.js");
+  return lunarModule;
 }
 
 let dbPool = null;
@@ -56,6 +70,24 @@ const CHINESE_TRAITS = {
   dog: "Loyal, sincere",
   pig: "Generous, warm-hearted",
 };
+
+const CHINESE_ANIMALS_ORDER = [
+  "rat", "ox", "tiger", "rabbit", "dragon", "snake",
+  "horse", "goat", "monkey", "rooster", "dog", "pig",
+];
+const CHINESE_ELEMENTS = ["Wood", "Fire", "Earth", "Metal", "Water"];
+
+function chineseAnimalFromLunarYear(year) {
+  if (!Number.isFinite(year)) return null;
+  const idx = ((year - 4) % 12 + 12) % 12;
+  return CHINESE_ANIMALS_ORDER[idx];
+}
+
+function chineseElementFromYear(year) {
+  if (!Number.isFinite(year)) return null;
+  const idx = Math.floor(((year - 4) % 10) / 2);
+  return CHINESE_ELEMENTS[idx];
+}
 
 async function getDb() {
   if (!DATABASE_URL) return null;
@@ -96,7 +128,7 @@ function readBody(req) {
 }
 
 function sendJson(res, status, data) {
-  res.writeHead(status, { "Content-Type": "application/json" });
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(data));
 }
 
@@ -398,6 +430,314 @@ async function resolveUtcOffsetMinutes({ birthDate, birthTime, timeZone, utcOffs
   }
 }
 
+function normalizeHumanDesignType(value) {
+  const raw = String(value || "").toLowerCase();
+  if (!raw) return null;
+  if (raw.includes("manifesting") && raw.includes("generator")) return "mg";
+  if (raw.includes("generator")) return "generator";
+  if (raw.includes("projector")) return "projector";
+  if (raw.includes("manifestor")) return "manifestor";
+  if (raw.includes("reflector")) return "reflector";
+  return null;
+}
+
+function pickFirst(...values) {
+  return values.find((value) => value != null && value !== "");
+}
+
+function normalizeHumanDesignApiPayload(data) {
+  const body = data?.data || data?.chart || data?.result || data || {};
+  const properties = body.properties || body;
+  const type = normalizeHumanDesignType(pickFirst(
+    properties.type,
+    properties.energyType,
+    properties.energy_type,
+    properties.humanDesignType,
+    properties.human_design_type
+  ));
+  const authority = pickFirst(
+    properties.authority,
+    properties.innerAuthority,
+    properties.inner_authority,
+    properties.decisionAuthority,
+    properties.decision_authority
+  );
+  const profile = pickFirst(
+    properties.profile,
+    properties.profileLine,
+    properties.profile_line,
+    properties.profileName,
+    properties.profile_name
+  );
+  return { type, authority, profile };
+}
+
+function parseBirthDateParts(birthDate) {
+  const match = String(birthDate || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  return { year: match[1], month: match[2], day: match[3] };
+}
+
+function parseBirthTimeParts(birthTime) {
+  const match = String(birthTime || "").match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return {
+    hour: String(hour).padStart(2, "0"),
+    minute: String(minute).padStart(2, "0"),
+  };
+}
+
+function formatBodyGraphBirthPlace(hit) {
+  let formatted = hit.name;
+  if (hit.region?.name && hit.name !== hit.region.name) {
+    formatted += `, ${hit.region.name}`;
+  }
+  if (hit.region?.country?.name) {
+    formatted += `, ${hit.region.country.name}`;
+  }
+  return formatted;
+}
+
+function normalizeBodyGraphProfile(value) {
+  if (!value) return null;
+  return String(value).replace(/\s+/g, "").replace(/-/g, "/");
+}
+
+function normalizeBodyGraphAuthority(value) {
+  if (!value) return null;
+  return String(value).trim().split(" - ")[0].trim();
+}
+
+function normalizeBodyGraphChartPayload(data) {
+  const properties = data?.Properties || data?.properties || {};
+  const type = normalizeHumanDesignType(pickFirst(
+    properties.Type?.id,
+    properties.Type?.option,
+    properties.type?.id,
+    properties.type?.option
+  ));
+  const authority = normalizeBodyGraphAuthority(pickFirst(
+    properties.InnerAuthority?.option,
+    properties.InnerAuthority?.id,
+    properties.innerAuthority?.option,
+    properties.innerAuthority?.id,
+    properties.Authority?.option,
+    properties.Authority?.id
+  ));
+  const profile = normalizeBodyGraphProfile(pickFirst(
+    properties.Profile?.option,
+    properties.Profile?.id,
+    properties.profile?.option,
+    properties.profile?.id
+  ));
+  return { type, authority, profile };
+}
+
+async function resolveBodyGraphLocation({ birthPlace, latitude, longitude, timeZone }) {
+  const hasCoords = Number.isFinite(latitude) && Number.isFinite(longitude);
+  const placeLabel = birthPlace?.trim();
+
+  if (hasCoords && timeZone && placeLabel) {
+    return {
+      birthplace: placeLabel,
+      latitude: String(latitude),
+      longitude: String(longitude),
+      timezone: timeZone,
+    };
+  }
+
+  if (!placeLabel) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(
+      `${BODYGRAPHCHART_LOCATIONS_URL}?query=${encodeURIComponent(placeLabel)}&limit=5`,
+      {
+        headers: { "User-Agent": USER_AGENT },
+        signal: controller.signal,
+      }
+    );
+    if (!res.ok) throw new Error(`Location lookup returned ${res.status}`);
+    const rows = await res.json();
+    if (!Array.isArray(rows) || !rows.length) return null;
+
+    let hit = rows[0];
+    if (hasCoords) {
+      const exact = rows.find((row) =>
+        Math.abs(Number(row.latitude) - latitude) < 0.75 &&
+        Math.abs(Number(row.longitude) - longitude) < 0.75
+      );
+      if (exact) hit = exact;
+    }
+
+    return {
+      birthplace: formatBodyGraphBirthPlace(hit),
+      latitude: hit.latitude,
+      longitude: hit.longitude,
+      timezone: hit.timezone || timeZone || null,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function calculateHumanDesignViaZenFemme({
+  birthDate,
+  birthTime,
+  birthPlace,
+  latitude,
+  longitude,
+  timeZone,
+}) {
+  const source = "Zen Femme free chart";
+  const dateParts = parseBirthDateParts(birthDate);
+  const timeParts = parseBirthTimeParts(birthTime);
+  if (!dateParts || !timeParts) {
+    return {
+      ok: false,
+      source,
+      message: "Human Design was not guessed. Birth date or time was invalid for chart generation.",
+    };
+  }
+
+  const location = await resolveBodyGraphLocation({
+    birthPlace,
+    latitude,
+    longitude,
+    timeZone,
+  });
+  if (!location?.timezone || !location.latitude || !location.longitude || !location.birthplace) {
+    return {
+      ok: false,
+      source,
+      message: "Human Design was not guessed. Could not resolve birth place timezone and coordinates for the Zen Femme chart source.",
+    };
+  }
+
+  const requestData = new URLSearchParams({
+    name: "Chart",
+    year: dateParts.year,
+    month: dateParts.month,
+    day: dateParts.day,
+    hour: timeParts.hour,
+    minute: timeParts.minute,
+    birthplace: location.birthplace,
+    timezone: location.timezone,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    chartUrl: `${ZEN_FEMME_CHART_URL}#chart,${Buffer.from(`name=Chart&birthplace=${location.birthplace}`).toString("base64")}`,
+  });
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HD_REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      `${BODYGRAPHCHART_GENERATE_URL}?token=${encodeURIComponent(BODYGRAPHCHART_EMBED_TOKEN)}`,
+      {
+        method: "POST",
+        headers: {
+          "User-Agent": USER_AGENT,
+          Origin: "https://thezenfemme.com",
+          Referer: ZEN_FEMME_CHART_URL,
+        },
+        body: requestData,
+        signal: controller.signal,
+      }
+    );
+    if (!res.ok) throw new Error(`Zen Femme chart source returned ${res.status}`);
+    const data = await res.json();
+    const parsed = normalizeBodyGraphChartPayload(data);
+    if (!parsed.type && !parsed.authority && !parsed.profile) {
+      throw new Error("Zen Femme chart response did not include Type, Authority, or Profile");
+    }
+    return {
+      ok: true,
+      source,
+      sourceUrl: ZEN_FEMME_CHART_URL,
+      ...parsed,
+    };
+  } catch (e) {
+    const message = e.name === "AbortError"
+      ? "Human Design calculation timed out contacting the Zen Femme chart source."
+      : (e.message || "Human Design calculation failed via Zen Femme; no value was guessed.");
+    return { ok: false, source, message };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function calculateHumanDesignViaApi({ birthDate, birthTime, birthPlace, latitude, longitude }) {
+  const source = "Human Design API";
+  if (!HUMAN_DESIGN_API_KEY) {
+    return {
+      ok: false,
+      source,
+      message: "Human Design API is not configured.",
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HD_REQUEST_TIMEOUT_MS);
+  try {
+    const useCoordinates = Number.isFinite(latitude) && Number.isFinite(longitude);
+    const url = useCoordinates
+      ? "https://api.humandesignapi.nl/v2/charts/coordinates"
+      : "https://api.humandesignapi.nl/v2/charts/simple";
+    const headers = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${HUMAN_DESIGN_API_KEY}`,
+      "User-Agent": USER_AGENT,
+    };
+    if (!useCoordinates && HUMAN_DESIGN_GEOCODE_KEY) {
+      headers["HD-Geocode-Key"] = HUMAN_DESIGN_GEOCODE_KEY;
+    }
+    const body = useCoordinates
+      ? { birthdate: birthDate, birthtime: birthTime, lat: latitude, lng: longitude }
+      : { birthdate: birthDate, birthtime: birthTime, location: birthPlace };
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Human Design source returned ${res.status}`);
+    const parsed = normalizeHumanDesignApiPayload(await res.json());
+    if (!parsed.type && !parsed.authority && !parsed.profile) {
+      throw new Error("Human Design response did not include chart properties");
+    }
+    return { ok: true, source, ...parsed };
+  } catch (e) {
+    return {
+      ok: false,
+      source,
+      message: e.message || "Human Design calculation failed; no value was guessed.",
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function calculateHumanDesign(args) {
+  const zen = await calculateHumanDesignViaZenFemme(args);
+  if (zen.ok) return zen;
+
+  if (HUMAN_DESIGN_API_KEY) {
+    const fallback = await calculateHumanDesignViaApi(args);
+    if (fallback.ok) return fallback;
+    return {
+      ok: false,
+      source: zen.source,
+      message: `${zen.message} Fallback Human Design API also failed.`,
+    };
+  }
+
+  return zen;
+}
+
 async function handleNatal(body) {
   const {
     birthDate,
@@ -409,6 +749,7 @@ async function handleNatal(body) {
   } = body || {};
 
   if (!birthDate) return { status: 400, body: { error: "birthDate required" } };
+  if (!birthTime) return { status: 400, body: { error: "birthTime required" } };
 
   let lat = latitude;
   let lon = longitude;
@@ -445,11 +786,25 @@ async function handleNatal(body) {
     latitude: lat,
     longitude: lon,
   });
+  const { chineseYearForBirthDate } = await getLunar();
+  const chineseYear = chineseYearForBirthDate(birthDate);
+  const humanDesign = await calculateHumanDesign({
+    birthDate,
+    birthTime,
+    birthPlace: placeLabel,
+    latitude: lat,
+    longitude: lon,
+    timeZone,
+  });
 
   return {
     status: 200,
     body: {
       ...chart,
+      chineseYear,
+      chineseAnimal: chineseAnimalFromLunarYear(chineseYear),
+      chineseElement: chineseElementFromYear(chineseYear),
+      humanDesign,
       latitude: lat,
       longitude: lon,
       birthPlace: placeLabel,

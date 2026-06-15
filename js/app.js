@@ -1,10 +1,10 @@
 import {
-  ZODIAC_SIGNS, HD_TYPES, HD_AUTHORITIES, HD_PROFILES,
+  ZODIAC_SIGNS, HD_TYPES,
   CHINESE_ZODIAC, CHINESE_ELEMENTS, LOOKING_FOR, GENDERS, INTERESTS,
   getZodiacById, getHdTypeById, getChineseById,
 } from "./data.js";
 import {
-  deriveCosmicFromBirthDate, compatibilityScore, matchesFilters,
+  compatibilityScore, matchesFilters,
   applyNatalChart, compatibilityInsight, compatibilityBreakdown,
 } from "./cosmic.js";
 import {
@@ -12,6 +12,7 @@ import {
 } from "./compatibility-matrix.js";
 import { compatibilitySources } from "./compatibility-data.js";
 import { fetchNatalChart, fetchTodayInsights } from "./api-client.js";
+import { BIRTH_LOCATIONS, getCitiesForCountry } from "./locations.js";
 import {
   getMyProfile, saveMyProfile, getPreferences, savePreferences,
   getAllProfiles, getProfileById, toggleLike, getLikes, createProfileId,
@@ -29,6 +30,67 @@ let viewProfileId = null;
 let todayRequestId = 0;
 
 const WIZARD_STEPS = ["Basics", "Cosmic self", "Preferences"];
+
+function calculateAge(birthDate, birthTime = "00:00") {
+  if (!birthDate) return null;
+  const born = new Date(`${birthDate}T${birthTime || "00:00"}:00`);
+  if (Number.isNaN(born.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - born.getFullYear();
+  const hadBirthday =
+    now.getMonth() > born.getMonth() ||
+    (now.getMonth() === born.getMonth() &&
+      (now.getDate() > born.getDate() ||
+        (now.getDate() === born.getDate() &&
+          (now.getHours() > born.getHours() ||
+            (now.getHours() === born.getHours() && now.getMinutes() >= born.getMinutes())))));
+  if (!hadBirthday) age--;
+  return age >= 0 ? age : null;
+}
+
+function ageLabel(profile) {
+  return calculateAge(profile?.birthDate, profile?.birthTime) ?? profile?.age ?? "";
+}
+
+function hasBirthInputs(d) {
+  return Boolean(d.birthDate && d.birthTime && buildBirthPlace(d));
+}
+
+function hasCalculatedChart(d) {
+  return Boolean(d.sunSign && d.moonSign && d.risingSign && d.chineseAnimal && d.chineseElement);
+}
+
+function buildBirthPlace(d) {
+  const city = d.birthCity === "__other__" ? d.birthCityOther : d.birthCity;
+  if (!city || !d.birthCountry) return "";
+  return `${city}, ${d.birthCountry}`;
+}
+
+function hydrateBirthLocation(d) {
+  const placeSource = d.birthPlace || d.location;
+  if ((d.birthCountry && d.birthCity) || !placeSource) return d;
+  const place = String(placeSource);
+  const placeLower = place.toLowerCase();
+  const cityCandidate = place.split(",")[0]?.trim();
+  const aliases = {
+    "United States": ["usa", "u.s.a.", "us", "u.s.", "united states of america"],
+    "United Kingdom": ["uk", "u.k.", "great britain", "england"],
+    "United Arab Emirates": ["uae", "u.a.e."],
+  };
+  const matched = BIRTH_LOCATIONS.find((item) => {
+    const names = [item.country, ...(aliases[item.country] || [])].map((name) => name.toLowerCase());
+    return names.some((name) => placeLower.includes(name)) ||
+      item.cities.some((city) => cityCandidate && city.toLowerCase() === cityCandidate.toLowerCase());
+  });
+  if (!matched || !cityCandidate) return d;
+  const matchedCity = matched.cities.find((item) => item.toLowerCase() === cityCandidate.toLowerCase());
+  return {
+    ...d,
+    birthCountry: matched.country,
+    birthCity: matchedCity || "__other__",
+    birthCityOther: matchedCity ? "" : cityCandidate,
+  };
+}
 
 function navigate(r, params = {}) {
   route = r;
@@ -82,10 +144,11 @@ function cosmicTagsHtml(p) {
 
 function profileCardHtml(p, viewer, prefs) {
   const score = viewer ? compatibilityScore(viewer, p, prefs) : null;
+  const age = ageLabel(p);
   return `
     <article class="card profile-card" data-profile-id="${esc(p.id)}">
       <img class="profile-card-avatar" src="${esc(p.avatar)}" alt="" loading="lazy" />
-      <h3>${esc(p.name)}, ${p.age}</h3>
+      <h3>${esc(p.name)}${age !== "" ? `, ${esc(age)}` : ""}</h3>
       <p class="profile-card-meta">${esc(p.location)}</p>
       <div class="cosmic-tags">
         ${cosmicTagsHtml(p)}
@@ -176,6 +239,25 @@ function sourceLinkHtml(item, label = "Source") {
 
 function statusTagHtml(ok) {
   return `<span class="tag ${ok ? "match" : ""}">${ok ? "Live source" : "Fallback"}</span>`;
+}
+
+const LEGACY_HD_RECALC_PROMPT = "Human Design can now be calculated from your birth data via the Zen Femme free chart. Click Calculate again, then save your profile.";
+
+function isLegacyHumanDesignApiFailure(p) {
+  const status = String(p?.hdCalculationStatus || "");
+  const source = String(p?.humanDesignSource || p?.hdSource || "");
+  return !p?.hdType && /Human Design API|HUMAN_DESIGN_API_KEY/i.test(`${source} ${status}`);
+}
+
+function humanDesignDisplay(p) {
+  const hd = getHdTypeById(p?.hdType);
+  const legacyApiFailure = isLegacyHumanDesignApiFailure(p);
+  const source = legacyApiFailure ? "" : (p?.humanDesignSource || p?.hdSource || "");
+  const status = legacyApiFailure
+    ? LEGACY_HD_RECALC_PROMPT
+    : (p?.hdCalculationStatus || "Human Design requires a verified calculation source. It will stay blank until one is available.");
+  const details = [p?.hdAuthority, p?.hdProfile].filter(Boolean).join(" · ");
+  return { hd, source, status, details };
 }
 
 function renderTodayCard({ eyebrow, title, meta, body, source, ok, extra = "" }) {
@@ -397,7 +479,8 @@ function renderProfileDetail() {
   const z = getZodiacById(p.sunSign || p.zodiac);
   const moonZ = getZodiacById(p.moonSign);
   const riseZ = getZodiacById(p.risingSign);
-  const hd = getHdTypeById(p.hdType);
+  const hdDisplay = humanDesignDisplay(p);
+  const hd = hdDisplay.hd;
   const cn = getChineseById(p.chineseAnimal);
   const score = viewer ? compatibilityScore(viewer, p, prefs) : null;
   const liked = getLikes().includes(p.id);
@@ -409,7 +492,7 @@ function renderProfileDetail() {
       <div class="profile-hero">
         <img src="${esc(p.avatar)}" alt="" />
         <div>
-          <h1 class="section-title" style="margin:0">${esc(p.name)}, ${p.age}</h1>
+          <h1 class="section-title" style="margin:0">${esc(p.name)}${ageLabel(p) !== "" ? `, ${esc(ageLabel(p))}` : ""}</h1>
           <p class="section-sub" style="margin:0.25rem 0 1rem">${esc(p.location)} · ${esc(p.gender)}</p>
           ${score != null ? `<p style="color:var(--gold-bright);font-weight:500">${score}% cosmic alignment with you</p>` : ""}
           ${viewer && !isMine && compatibilityInsight(viewer, p) ? `<p style="font-size:0.9rem;color:var(--lavender);font-style:italic;margin:0.5rem 0 0">${esc(compatibilityInsight(viewer, p))}</p>` : ""}
@@ -432,9 +515,10 @@ function renderProfileDetail() {
         </div>
         <div class="cosmic-item">
           <div class="label">Human Design</div>
-          <div class="value">${hd ? hd.name : "—"}</div>
-          <p style="font-size:0.8rem;color:var(--text-muted);margin:0.25rem 0 0">${esc(p.hdProfile || "")} · ${esc(p.hdAuthority || "")}</p>
+          <div class="value">${hd ? hd.name : "Not calculated"}</div>
+          <p style="font-size:0.8rem;color:var(--text-muted);margin:0.25rem 0 0">${hd ? esc(hdDisplay.details || "Type calculated") : esc(hdDisplay.status)}</p>
           ${hd ? `<p style="font-size:0.75rem;color:var(--mint)">Strategy: ${hd.strategy}</p>` : ""}
+          ${hdDisplay.source ? `<p style="font-size:0.75rem;color:var(--blue);margin:0.25rem 0 0">Source: ${esc(hdDisplay.source)}</p>` : ""}
         </div>
         <div class="cosmic-item">
           <div class="label">Chinese year</div>
@@ -482,11 +566,18 @@ function chipGrid(name, options, selected, valueKey = "id", labelFn = (o) => o.n
 
 function renderCreate() {
   const existing = getMyProfile();
-  const d = { ...existing, ...wizardDraft };
-  const cosmic = deriveCosmicFromBirthDate(d.birthDate);
-  const autoZodiac = d.zodiac || cosmic.zodiac;
-  const autoChinese = d.chineseAnimal || cosmic.chineseAnimal;
-  const autoElement = d.chineseElement || cosmic.chineseElement;
+  const source = Object.keys(wizardDraft).length ? wizardDraft : existing;
+  const d = hydrateBirthLocation({ ...source });
+  wizardDraft = { ...d };
+  if (hasCalculatedChart(d) && !d._calculatedBirthDate) {
+    wizardDraft._calculatedBirthDate = d.birthDate;
+    wizardDraft._calculatedBirthTime = d.birthTime;
+    wizardDraft._calculatedBirthPlace = d.birthPlace;
+    d._calculatedBirthDate = d.birthDate;
+    d._calculatedBirthTime = d.birthTime;
+    d._calculatedBirthPlace = d.birthPlace;
+  }
+  const age = calculateAge(d.birthDate, d.birthTime);
 
   const stepsHtml = WIZARD_STEPS.map((label, i) =>
     `<div class="wizard-step${i < wizardStep ? " done" : ""}${i === wizardStep ? " active" : ""}" title="${esc(label)}"></div>`
@@ -496,15 +587,9 @@ function renderCreate() {
 
   if (wizardStep === 0) {
     stepContent = `
-      <div class="form-row">
-        <div class="form-group">
-          <label for="name">Display name</label>
-          <input id="name" name="name" value="${esc(d.name || "")}" required />
-        </div>
-        <div class="form-group">
-          <label for="age">Age</label>
-          <input id="age" name="age" type="number" min="18" max="120" value="${esc(d.age || "")}" required />
-        </div>
+      <div class="form-group">
+        <label for="name">Display name</label>
+        <input id="name" name="name" value="${esc(d.name || "")}" required />
       </div>
       <div class="form-group">
         <label for="location">Location</label>
@@ -535,59 +620,88 @@ function renderCreate() {
       </div>
     `;
   } else if (wizardStep === 1) {
-    const chartHint = d.sunSign
-      ? `Calculated: ☉ ${getZodiacById(d.sunSign)?.name || d.sunSign}${d.moonSign ? ` · ☽ ${getZodiacById(d.moonSign)?.name}` : ""}${d.risingSign ? ` · ↑ ${getZodiacById(d.risingSign)?.name}` : ""}`
-      : "";
+    const sun = getZodiacById(d.sunSign);
+    const moon = getZodiacById(d.moonSign);
+    const rising = getZodiacById(d.risingSign);
+    const chinese = getChineseById(d.chineseAnimal);
+    const countriesHtml = BIRTH_LOCATIONS
+      .map((item) => `<option value="${esc(item.country)}"${d.birthCountry === item.country ? " selected" : ""}>${esc(item.country)}</option>`)
+      .join("");
+    const cities = getCitiesForCountry(d.birthCountry);
+    const cityOptionsHtml = [
+      '<option value="">Select city...</option>',
+      ...cities.map((city) => `<option value="${esc(city)}"${d.birthCity === city ? " selected" : ""}>${esc(city)}</option>`),
+      `<option value="__other__"${d.birthCity === "__other__" ? " selected" : ""}>Other city...</option>`,
+    ].join("");
+    const selectedBirthPlace = buildBirthPlace(d);
+    const chartHint = hasCalculatedChart(d)
+      ? `Calculated from birth data: ☉ ${sun?.name || d.sunSign}${moon ? ` · ☽ ${moon.name}` : ""}${rising ? ` · ↑ ${rising.name}` : ""}`
+      : "Enter birth date, exact time, and place, then calculate. The app will not guess your signs.";
+    const hdDisplay = humanDesignDisplay(d);
     stepContent = `
       <div class="form-group">
         <label for="birthDate">Birth date</label>
-        <input id="birthDate" name="birthDate" type="date" value="${esc(d.birthDate || "")}" />
+        <input id="birthDate" name="birthDate" type="date" value="${esc(d.birthDate || "")}" required />
+        <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">
+          Age is calculated from this date${age != null ? `: ${age}` : ""}. We never ask you to type it.
+        </p>
       </div>
       <div class="form-row">
         <div class="form-group">
           <label for="birthTime">Birth time</label>
-          <input id="birthTime" name="birthTime" type="time" value="${esc(d.birthTime || "")}" />
-          <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">Needed for Moon & Rising</p>
+          <input id="birthTime" name="birthTime" type="time" value="${esc(d.birthTime || "")}" required />
+          <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">Required for Moon, Rising, and verified Human Design calculations.</p>
         </div>
         <div class="form-group">
-          <label for="birthPlace">Birth place</label>
-          <input id="birthPlace" name="birthPlace" value="${esc(d.birthPlace || "")}" placeholder="City, Country" />
+          <label for="birthCountry">Country of birth</label>
+          <select id="birthCountry" name="birthCountry" required>
+            <option value="">Select country...</option>
+            ${countriesHtml}
+          </select>
         </div>
       </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="birthCity">City of birth</label>
+          <select id="birthCity" name="birthCity" ${d.birthCountry ? "" : "disabled"} required>
+            ${cityOptionsHtml}
+          </select>
+        </div>
+        <div class="form-group${d.birthCity === "__other__" ? "" : " hidden"}" id="birth-city-other-wrap">
+          <label for="birthCityOther">Other birth city</label>
+          <input id="birthCityOther" name="birthCityOther" value="${esc(d.birthCityOther || "")}" placeholder="Type your birth city" />
+        </div>
+      </div>
+      <p style="font-size:0.78rem;color:var(--text-muted);margin:-0.25rem 0 1rem">
+        Selected birth place: ${selectedBirthPlace ? esc(selectedBirthPlace) : "Choose country and city"}
+      </p>
+      <input type="hidden" id="birthPlace" name="birthPlace" value="${esc(selectedBirthPlace)}" />
       <input type="hidden" id="birthLatitude" name="birthLatitude" value="${esc(d.birthLatitude ?? "")}" />
       <input type="hidden" id="birthLongitude" name="birthLongitude" value="${esc(d.birthLongitude ?? "")}" />
       <input type="hidden" id="utcOffsetMinutes" name="utcOffsetMinutes" value="${esc(d.utcOffsetMinutes ?? "")}" />
       <p id="chart-status" style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem">${esc(chartHint)}</p>
-      <button type="button" class="btn btn-secondary btn-sm" id="btn-calc-chart" style="margin-bottom:1.25rem">Calculate chart from date, time & place</button>
-      <div class="form-group">
-        <label>Western zodiac ${autoZodiac ? `(suggested: ${getZodiacById(autoZodiac)?.name})` : ""}</label>
-        ${chipGrid("zodiac", ZODIAC_SIGNS, [d.zodiac || autoZodiac].filter(Boolean), "id", (z) => `${z.symbol} ${z.name}`)}
-      </div>
-      <div class="form-group">
-        <label>Human Design type</label>
-        ${chipGrid("hdType", HD_TYPES, [d.hdType].filter(Boolean))}
-      </div>
-      <div class="form-group">
-        <label for="hdAuthority">Authority</label>
-        <select id="hdAuthority" name="hdAuthority">
-          <option value="">Select…</option>
-          ${HD_AUTHORITIES.map((a) => `<option value="${a}"${d.hdAuthority === a ? " selected" : ""}>${a}</option>`).join("")}
-        </select>
-      </div>
-      <div class="form-group">
-        <label for="hdProfile">Profile line</label>
-        <select id="hdProfile" name="hdProfile">
-          <option value="">Select…</option>
-          ${HD_PROFILES.map((pr) => `<option value="${pr}"${d.hdProfile === pr ? " selected" : ""}>${pr}</option>`).join("")}
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Chinese zodiac ${autoChinese ? `(suggested: ${getChineseById(autoChinese)?.name})` : ""}</label>
-        ${chipGrid("chineseAnimal", CHINESE_ZODIAC, [d.chineseAnimal || autoChinese].filter(Boolean), "id", (c) => `${c.emoji} ${c.name}`)}
-      </div>
-      <div class="form-group">
-        <label>Chinese element ${autoElement ? `(suggested: ${autoElement})` : ""}</label>
-        ${chipGrid("chineseElement", CHINESE_ELEMENTS, [d.chineseElement || autoElement].filter(Boolean))}
+      <button type="button" class="btn btn-secondary btn-sm" id="btn-calc-chart" style="margin-bottom:1.25rem">Calculate from birth date, time & place</button>
+      <div class="calculated-grid">
+        <div class="cosmic-item">
+          <div class="label">Western chart</div>
+          <div class="value">${sun ? `☉ ${sun.symbol} ${sun.name}` : "Not calculated"}</div>
+          <p style="font-size:0.78rem;color:var(--text-muted);margin:0.25rem 0 0">
+            ${moon ? `☽ ${moon.name}` : "Moon pending"}${rising ? ` · ↑ ${rising.name}` : " · Rising pending"}
+          </p>
+        </div>
+        <div class="cosmic-item">
+          <div class="label">Chinese zodiac</div>
+          <div class="value">${chinese ? `${chinese.emoji} ${chinese.name}` : "Not calculated"}</div>
+          <p style="font-size:0.78rem;color:var(--text-muted);margin:0.25rem 0 0">${esc(d.chineseElement || "Element pending")}</p>
+        </div>
+        <div class="cosmic-item">
+          <div class="label">Human Design</div>
+          <div class="value">${d.hdType ? esc(getHdTypeById(d.hdType)?.name || d.hdType) : "Not calculated"}</div>
+          <p style="font-size:0.78rem;color:var(--text-muted);margin:0.25rem 0 0">
+            ${hdDisplay.details ? esc(hdDisplay.details) : esc(hdDisplay.status)}
+          </p>
+          ${hdDisplay.source ? `<p style="font-size:0.72rem;color:var(--blue);margin:0.25rem 0 0">Source: ${esc(hdDisplay.source)}</p>` : ""}
+        </div>
       </div>
     `;
   } else {
@@ -626,7 +740,10 @@ function renderCreate() {
   `;
 
   bindChipGroups();
-  if (wizardStep === 1) bindChartCalculator();
+  if (wizardStep === 1) {
+    bindBirthLocationSelectors();
+    bindChartCalculator();
+  }
   document.getElementById("wizard-back")?.addEventListener("click", () => {
     collectWizardForm();
     wizardStep--;
@@ -635,6 +752,13 @@ function renderCreate() {
   document.getElementById("wizard-form")?.addEventListener("submit", (e) => {
     e.preventDefault();
     collectWizardForm();
+    if (wizardStep === 1 && !hasCalculatedChart(wizardDraft)) {
+      const status = document.getElementById("chart-status");
+      if (status) status.textContent = hasBirthInputs(wizardDraft)
+        ? "Please calculate from your birth date, time, and place before continuing."
+        : "Birth date, exact time, and birth place are required before continuing.";
+      return;
+    }
     if (wizardStep < WIZARD_STEPS.length - 1) {
       wizardStep++;
       renderCreate();
@@ -654,14 +778,12 @@ function collectWizardForm() {
   wizardDraft.lookingFor = getChipValues("lookingFor");
   wizardDraft.interests = getChipValues("interests");
   if (wizardStep === 1) {
-    wizardDraft.zodiac = getChipValues("zodiac")[0] || wizardDraft.zodiac;
-    wizardDraft.hdType = getChipValues("hdType")[0] || wizardDraft.hdType;
-    wizardDraft.chineseAnimal = getChipValues("chineseAnimal")[0] || wizardDraft.chineseAnimal;
-    wizardDraft.chineseElement = getChipValues("chineseElement")[0] || wizardDraft.chineseElement;
-    const cosmic = deriveCosmicFromBirthDate(wizardDraft.birthDate);
-    wizardDraft.zodiac = wizardDraft.zodiac || cosmic.zodiac;
-    wizardDraft.chineseAnimal = wizardDraft.chineseAnimal || cosmic.chineseAnimal;
-    wizardDraft.chineseElement = wizardDraft.chineseElement || cosmic.chineseElement;
+    wizardDraft.birthPlace = buildBirthPlace(wizardDraft);
+    if (wizardDraft.birthDate !== wizardDraft._calculatedBirthDate ||
+      wizardDraft.birthTime !== wizardDraft._calculatedBirthTime ||
+      wizardDraft.birthPlace !== wizardDraft._calculatedBirthPlace) {
+      clearCalculatedBirthFields();
+    }
   }
   if (wizardStep === 2) {
     wizardDraft.prefZodiac = getChipValues("prefZodiac");
@@ -675,6 +797,49 @@ function getChipValues(group) {
   return [...document.querySelectorAll(`[data-chip="${group}"].selected`)].map((el) => el.dataset.value);
 }
 
+function clearCalculatedBirthFields() {
+  delete wizardDraft.sunSign;
+  delete wizardDraft.moonSign;
+  delete wizardDraft.risingSign;
+  delete wizardDraft.zodiac;
+  delete wizardDraft.chineseAnimal;
+  delete wizardDraft.chineseElement;
+  delete wizardDraft.hdType;
+  delete wizardDraft.hdAuthority;
+  delete wizardDraft.hdProfile;
+  delete wizardDraft.humanDesignSource;
+  delete wizardDraft.hdCalculationStatus;
+  delete wizardDraft.birthLatitude;
+  delete wizardDraft.birthLongitude;
+  delete wizardDraft.utcOffsetMinutes;
+}
+
+function bindBirthLocationSelectors() {
+  const country = document.getElementById("birthCountry");
+  const city = document.getElementById("birthCity");
+  const cityOther = document.getElementById("birthCityOther");
+  country?.addEventListener("change", () => {
+    collectWizardForm();
+    wizardDraft.birthCountry = country.value;
+    wizardDraft.birthCity = "";
+    wizardDraft.birthCityOther = "";
+    clearCalculatedBirthFields();
+    renderCreate();
+  });
+  city?.addEventListener("change", () => {
+    collectWizardForm();
+    wizardDraft.birthCity = city.value;
+    if (city.value !== "__other__") wizardDraft.birthCityOther = "";
+    clearCalculatedBirthFields();
+    renderCreate();
+  });
+  cityOther?.addEventListener("change", () => {
+    collectWizardForm();
+    clearCalculatedBirthFields();
+    renderCreate();
+  });
+}
+
 async function bindChartCalculator() {
   const btn = document.getElementById("btn-calc-chart");
   const status = document.getElementById("chart-status");
@@ -686,27 +851,52 @@ async function bindChartCalculator() {
       if (status) status.textContent = "Enter a birth date first.";
       return;
     }
-    if (!d.birthPlace && (d.birthLatitude == null || d.birthLongitude == null)) {
-      if (status) status.textContent = "Enter birth place (city) for Rising sign.";
+    if (!d.birthTime) {
+      if (status) status.textContent = "Enter the exact birth time before calculating.";
+      return;
+    }
+    const birthPlace = buildBirthPlace(d);
+    if (!birthPlace && (d.birthLatitude == null || d.birthLongitude == null)) {
+      if (status) status.textContent = "Enter birth place (city, country) before calculating.";
       return;
     }
     btn.disabled = true;
-    if (status) status.textContent = "Calculating chart…";
+    if (status) status.textContent = "Calculating from birth date, time, and place...";
     try {
       const chart = await fetchNatalChart({
         birthDate: d.birthDate,
-        birthTime: d.birthTime || "12:00",
-        birthPlace: d.birthPlace,
+        birthTime: d.birthTime,
+        birthPlace,
         latitude: d.birthLatitude ? Number(d.birthLatitude) : undefined,
         longitude: d.birthLongitude ? Number(d.birthLongitude) : undefined,
         utcOffsetMinutes: d.utcOffsetMinutes ? Number(d.utcOffsetMinutes) : undefined,
       });
       wizardDraft = applyNatalChart(wizardDraft, chart);
+      wizardDraft.birthPlace = birthPlace;
       wizardDraft.zodiac = chart.sunSign || wizardDraft.zodiac;
+      wizardDraft.chineseAnimal = chart.chineseAnimal || wizardDraft.chineseAnimal;
+      wizardDraft.chineseElement = chart.chineseElement || wizardDraft.chineseElement;
+      wizardDraft._calculatedBirthDate = wizardDraft.birthDate;
+      wizardDraft._calculatedBirthTime = wizardDraft.birthTime;
+      wizardDraft._calculatedBirthPlace = wizardDraft.birthPlace;
+      if (chart.humanDesign?.ok) {
+        wizardDraft.hdType = chart.humanDesign.type || wizardDraft.hdType;
+        wizardDraft.hdAuthority = chart.humanDesign.authority || wizardDraft.hdAuthority;
+        wizardDraft.hdProfile = chart.humanDesign.profile || wizardDraft.hdProfile;
+        wizardDraft.humanDesignSource = chart.humanDesign.source || "Zen Femme free chart";
+        delete wizardDraft.hdSource;
+        delete wizardDraft.hdCalculationStatus;
+      } else {
+        delete wizardDraft.hdType;
+        delete wizardDraft.hdAuthority;
+        delete wizardDraft.hdProfile;
+        wizardDraft.hdCalculationStatus = chart.humanDesign?.message || "No verified Human Design calculation source is configured.";
+      }
       const parts = [
         chart.sunSign && `☉ ${getZodiacById(chart.sunSign)?.name}`,
         chart.moonSign && `☽ ${getZodiacById(chart.moonSign)?.name}`,
         chart.risingSign && `↑ ${getZodiacById(chart.risingSign)?.name}`,
+        chart.chineseAnimal && `${getChineseById(chart.chineseAnimal)?.emoji} ${getChineseById(chart.chineseAnimal)?.name}`,
       ].filter(Boolean);
       if (status) status.textContent = `Calculated: ${parts.join(" · ")}`;
       renderCreate();
@@ -736,10 +926,11 @@ function bindChipGroups() {
 function finishWizard() {
   const existing = getMyProfile();
   const d = wizardDraft;
+  const age = calculateAge(d.birthDate, d.birthTime);
   const profile = {
     id: existing?.id || createProfileId(),
     name: d.name,
-    age: parseInt(d.age, 10),
+    age,
     location: d.location,
     bio: d.bio,
     gender: d.gender,
@@ -748,17 +939,22 @@ function finishWizard() {
     interests: d.interests || [],
     birthDate: d.birthDate,
     birthTime: d.birthTime,
+    birthCountry: d.birthCountry,
+    birthCity: d.birthCity,
+    birthCityOther: d.birthCityOther,
     birthPlace: d.birthPlace,
     birthLatitude: d.birthLatitude != null && d.birthLatitude !== "" ? Number(d.birthLatitude) : undefined,
     birthLongitude: d.birthLongitude != null && d.birthLongitude !== "" ? Number(d.birthLongitude) : undefined,
     utcOffsetMinutes: d.utcOffsetMinutes != null && d.utcOffsetMinutes !== "" ? Number(d.utcOffsetMinutes) : undefined,
-    sunSign: d.sunSign || d.zodiac,
+    sunSign: d.sunSign,
     moonSign: d.moonSign,
     risingSign: d.risingSign,
-    zodiac: d.zodiac || d.sunSign,
+    zodiac: d.sunSign,
     hdType: d.hdType,
     hdAuthority: d.hdAuthority,
     hdProfile: d.hdProfile,
+    humanDesignSource: d.humanDesignSource,
+    hdCalculationStatus: d.hdCalculationStatus,
     chineseAnimal: d.chineseAnimal,
     chineseElement: d.chineseElement,
   };

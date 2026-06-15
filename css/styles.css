@@ -617,6 +617,13 @@ html[dir="rtl"] .form-row {
   margin: 1.5rem 0;
 }
 
+.calculated-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 1rem;
+  margin-top: 0.25rem;
+}
+
 .cosmic-item {
   padding: 1rem;
   border-radius: var(--radius-sm);
