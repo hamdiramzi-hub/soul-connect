@@ -33,6 +33,20 @@ let locationRequestId = 0;
 const WIZARD_STEPS = ["Basics", "Cosmic self", "Preferences"];
 const OTHER_CITY_VALUE = "__other__";
 const COUNTRIES_CACHE_KEY = "cosmic-countries-v1";
+const MONTHS = [
+  ["01", "January"],
+  ["02", "February"],
+  ["03", "March"],
+  ["04", "April"],
+  ["05", "May"],
+  ["06", "June"],
+  ["07", "July"],
+  ["08", "August"],
+  ["09", "September"],
+  ["10", "October"],
+  ["11", "November"],
+  ["12", "December"],
+];
 const LOCAL_COUNTRIES = BIRTH_LOCATIONS.map((item) => item.country);
 const birthLocationState = {
   countries: LOCAL_COUNTRIES,
@@ -65,6 +79,38 @@ function currentBirthCities(country, query = "") {
   }
   const loaded = birthLocationState.citiesByCountry.get(country);
   return loaded?.length ? loaded : getCitiesForCountry(country);
+}
+
+function birthDateParts(dateStr = "") {
+  const match = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return {
+    year: match?.[1] || "",
+    month: match?.[2] || "",
+    day: match?.[3] || "",
+  };
+}
+
+function buildBirthDate(d) {
+  if (!d.birthYear || !d.birthMonth || !d.birthDay) return "";
+  return `${d.birthYear}-${d.birthMonth}-${d.birthDay}`;
+}
+
+function birthYearsHtml(selected) {
+  const thisYear = new Date().getFullYear();
+  let html = '<option value="">Year</option>';
+  for (let year = thisYear; year >= 1900; year--) {
+    html += `<option value="${year}"${String(selected) === String(year) ? " selected" : ""}>${year}</option>`;
+  }
+  return html;
+}
+
+function birthDaysHtml(selected) {
+  let html = '<option value="">Day</option>';
+  for (let day = 1; day <= 31; day++) {
+    const value = String(day).padStart(2, "0");
+    html += `<option value="${value}"${selected === value ? " selected" : ""}>${day}</option>`;
+  }
+  return html;
 }
 
 function isCreateCosmicStep() {
@@ -692,6 +738,11 @@ function renderCreate() {
   const existing = getMyProfile();
   const source = Object.keys(wizardDraft).length ? wizardDraft : existing;
   const d = hydrateBirthLocation({ ...source });
+  const parts = birthDateParts(d.birthDate);
+  d.birthYear ||= parts.year;
+  d.birthMonth ||= parts.month;
+  d.birthDay ||= parts.day;
+  d.birthCityQuery ||= d.birthCity && d.birthCity !== OTHER_CITY_VALUE ? d.birthCity : "";
   wizardDraft = { ...d };
   if (hasCalculatedChart(d) && !d._calculatedBirthDate) {
     wizardDraft._calculatedBirthDate = d.birthDate;
@@ -752,10 +803,11 @@ function renderCreate() {
     const countriesHtml = countries
       .map((country) => `<option value="${esc(country)}"${d.birthCountry === country ? " selected" : ""}>${esc(country)}</option>`)
       .join("");
-    const cities = currentBirthCities(d.birthCountry);
+    const cityQuery = String(d.birthCityQuery || "").trim();
+    const cities = currentBirthCities(d.birthCountry, cityQuery);
     const selectedCityMissing = d.birthCity && d.birthCity !== OTHER_CITY_VALUE && !cities.includes(d.birthCity);
     const cityOptionsHtml = [
-      '<option value="">Select city...</option>',
+      `<option value="">${cityQuery.length >= 2 ? "Select city..." : "Search first..."}</option>`,
       ...cities.map((city) => `<option value="${esc(city)}"${d.birthCity === city ? " selected" : ""}>${esc(city)}</option>`),
       ...(selectedCityMissing ? [`<option value="${esc(d.birthCity)}" selected>${esc(d.birthCity)}</option>`] : []),
       `<option value="${OTHER_CITY_VALUE}"${d.birthCity === OTHER_CITY_VALUE ? " selected" : ""}>Other city...</option>`,
@@ -776,8 +828,20 @@ function renderCreate() {
     const hdDisplay = humanDesignDisplay(d);
     stepContent = `
       <div class="form-group">
-        <label for="birthDate">Birth date</label>
-        <input id="birthDate" name="birthDate" type="date" value="${esc(d.birthDate || "")}" required />
+        <label>Birth date</label>
+        <div class="form-row birth-date-row">
+          <select id="birthMonth" name="birthMonth" required>
+            <option value="">Month</option>
+            ${MONTHS.map(([value, label]) => `<option value="${value}"${d.birthMonth === value ? " selected" : ""}>${label}</option>`).join("")}
+          </select>
+          <select id="birthDay" name="birthDay" required>
+            ${birthDaysHtml(d.birthDay)}
+          </select>
+          <select id="birthYear" name="birthYear" required>
+            ${birthYearsHtml(d.birthYear)}
+          </select>
+        </div>
+        <input id="birthDate" name="birthDate" type="hidden" value="${esc(buildBirthDate(d) || d.birthDate || "")}" />
         <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">
           Age is calculated from this date${age != null ? `: ${age}` : ""}. We never ask you to type it.
         </p>
@@ -798,8 +862,13 @@ function renderCreate() {
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label for="birthCity">City of birth</label>
-          <select id="birthCity" name="birthCity" ${d.birthCountry && !cityLoading ? "" : "disabled"} required>
+          <label for="birthCityQuery">Search birth city</label>
+          <input id="birthCityQuery" name="birthCityQuery" value="${esc(d.birthCityQuery || "")}" placeholder="Type city name, e.g. Zurich" ${d.birthCountry ? "" : "disabled"} />
+          <p style="font-size:0.72rem;color:var(--text-muted);margin-top:0.25rem">${cityLoading ? "Loading matching cities..." : "Type at least 2 letters, then choose from Select city."}</p>
+        </div>
+        <div class="form-group">
+          <label for="birthCity">Select city</label>
+          <select id="birthCity" name="birthCity" ${d.birthCountry && !cityLoading && (cityQuery.length >= 2 || d.birthCity === OTHER_CITY_VALUE) ? "" : "disabled"} required>
             ${cityLoading ? '<option value="">Loading cities...</option>' : cityOptionsHtml}
           </select>
         </div>
@@ -881,7 +950,7 @@ function renderCreate() {
     bindBirthLocationSelectors();
     bindChartCalculator();
     loadBirthCountries(true);
-    if (d.birthCountry) loadBirthCities(d.birthCountry, d.birthCity || "");
+    if (d.birthCountry && cityQuery.length >= 2) loadBirthCities(d.birthCountry, cityQuery);
   }
   document.getElementById("wizard-back")?.addEventListener("click", () => {
     collectWizardForm();
@@ -917,9 +986,10 @@ function collectWizardForm() {
   wizardDraft.lookingFor = getChipValues("lookingFor");
   wizardDraft.interests = getChipValues("interests");
   if (wizardStep === 1) {
-    ["birthDate", "birthTime", "birthCountry", "birthCity", "birthCityOther", "birthPlace", "birthLatitude", "birthLongitude", "utcOffsetMinutes"].forEach((key) => {
+    ["birthDate", "birthMonth", "birthDay", "birthYear", "birthTime", "birthCountry", "birthCityQuery", "birthCity", "birthCityOther", "birthPlace", "birthLatitude", "birthLongitude", "utcOffsetMinutes"].forEach((key) => {
       wizardDraft[key] = fd.get(key) || "";
     });
+    wizardDraft.birthDate = buildBirthDate(wizardDraft);
     wizardDraft.birthPlace = buildBirthPlace(wizardDraft);
     if (wizardDraft.birthDate !== wizardDraft._calculatedBirthDate ||
       wizardDraft.birthTime !== wizardDraft._calculatedBirthTime ||
@@ -957,16 +1027,42 @@ function clearCalculatedBirthFields() {
 }
 
 function bindBirthLocationSelectors() {
+  const birthMonth = document.getElementById("birthMonth");
+  const birthDay = document.getElementById("birthDay");
+  const birthYear = document.getElementById("birthYear");
   const country = document.getElementById("birthCountry");
+  const cityQuery = document.getElementById("birthCityQuery");
   const city = document.getElementById("birthCity");
   const cityOther = document.getElementById("birthCityOther");
+  [birthMonth, birthDay, birthYear].forEach((el) => {
+    el?.addEventListener("change", () => {
+      collectWizardForm();
+      clearCalculatedBirthFields();
+      renderCreate();
+    });
+  });
   country?.addEventListener("change", () => {
     collectWizardForm();
     wizardDraft.birthCountry = country.value;
+    wizardDraft.birthCityQuery = "";
     wizardDraft.birthCity = "";
     wizardDraft.birthCityOther = "";
     clearCalculatedBirthFields();
     renderCreate();
+  });
+  let citySearchTimer;
+  cityQuery?.addEventListener("input", () => {
+    clearTimeout(citySearchTimer);
+    wizardDraft.birthCityQuery = cityQuery.value;
+    wizardDraft.birthCity = "";
+    wizardDraft.birthCityOther = "";
+    clearCalculatedBirthFields();
+    const q = cityQuery.value.trim();
+    if (wizardDraft.birthCountry && q.length >= 2) {
+      const cacheKey = `${wizardDraft.birthCountry}::${q.toLowerCase()}`;
+      birthLocationState.cityLoads.delete(cacheKey);
+      citySearchTimer = setTimeout(() => loadBirthCities(wizardDraft.birthCountry, q), 250);
+    }
   });
   city?.addEventListener("change", () => {
     collectWizardForm();

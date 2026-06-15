@@ -514,6 +514,10 @@ html[dir="rtl"] .form-row {
   gap: 1rem;
 }
 
+.birth-date-row {
+  grid-template-columns: 1.4fr 0.9fr 1fr;
+}
+
 @media (max-width: 520px) {
   .form-row { grid-template-columns: 1fr; }
 }
