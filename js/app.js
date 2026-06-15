@@ -11,7 +11,7 @@ import {
   topWesternMatches, topChineseMatches, zodiacPairScore,
 } from "./compatibility-matrix.js";
 import { compatibilitySources } from "./compatibility-data.js";
-import { fetchNatalChart, geocodePlace } from "./api-client.js";
+import { fetchNatalChart, fetchTodayInsights } from "./api-client.js";
 import {
   getMyProfile, saveMyProfile, getPreferences, savePreferences,
   getAllProfiles, getProfileById, toggleLike, getLikes, createProfileId,
@@ -26,6 +26,7 @@ let route = "home";
 let wizardStep = 0;
 let wizardDraft = {};
 let viewProfileId = null;
+let todayRequestId = 0;
 
 const WIZARD_STEPS = ["Basics", "Cosmic self", "Preferences"];
 
@@ -49,6 +50,7 @@ function renderNav() {
   const links = [
     { id: "home", label: "Home" },
     { id: "discover", label: "Discover" },
+    ...(profile ? [{ id: "today", label: "Today" }] : []),
     profile
       ? { id: "profile", label: "My profile" }
       : { id: "create", label: "Create profile" },
@@ -165,6 +167,139 @@ function renderSignMatches() {
     </div>
     <p style="margin-top:1rem"><button type="button" class="btn btn-primary" data-nav="discover">Find souls in Discover</button></p>
   `;
+}
+
+function sourceLinkHtml(item, label = "Source") {
+  if (!item?.sourceUrl) return "";
+  return `<a class="source-link" href="${esc(item.sourceUrl)}" target="_blank" rel="noopener">${esc(label)}</a>`;
+}
+
+function statusTagHtml(ok) {
+  return `<span class="tag ${ok ? "match" : ""}">${ok ? "Live source" : "Fallback"}</span>`;
+}
+
+function renderTodayCard({ eyebrow, title, meta, body, source, ok, extra = "" }) {
+  return `
+    <article class="card today-card">
+      <div class="today-card-head">
+        <span class="today-eyebrow">${esc(eyebrow)}</span>
+        ${statusTagHtml(ok)}
+      </div>
+      <h3>${esc(title)}</h3>
+      ${meta ? `<p class="today-meta">${esc(meta)}</p>` : ""}
+      <p class="daily-text">${esc(body)}</p>
+      ${extra}
+      ${sourceLinkHtml(source)}
+    </article>
+  `;
+}
+
+function renderTodayContent(me, data) {
+  const sun = getZodiacById(me.sunSign || me.zodiac);
+  const hd = getHdTypeById(me.hdType);
+  const cn = getChineseById(me.chineseAnimal);
+  const hdImpact = data.humanDesign || {};
+  const hdExtraParts = [
+    hdImpact.gate && `Gate: ${hdImpact.gate}`,
+    hdImpact.line && `Line ${hdImpact.line}${hdImpact.lineName ? ` - ${hdImpact.lineName}` : ""}`,
+    hdImpact.bodygraph && `Center: ${hdImpact.bodygraph}`,
+    hdImpact.harmonicGate && `Harmonic: ${hdImpact.harmonicGate}`,
+  ].filter(Boolean);
+
+  app.innerHTML = `
+    <section class="today-hero card">
+      <span class="hero-badge">Today</span>
+      <h1>Your daily cosmic weather</h1>
+      <p>Read the day through your saved Sun sign, Human Design, and Chinese zodiac year.</p>
+      <div class="cosmic-tags">
+        ${sun ? `<span class="tag zodiac">${sun.symbol} ${sun.name}</span>` : ""}
+        ${hd ? `<span class="tag hd">${hd.name}</span>` : ""}
+        ${cn ? `<span class="tag chinese">${cn.emoji} ${cn.name}${me.chineseElement ? ` · ${esc(me.chineseElement)}` : ""}</span>` : ""}
+      </div>
+    </section>
+    <div class="today-grid">
+      ${renderTodayCard({
+        eyebrow: "Western astrology",
+        title: data.horoscope?.title || "Daily horoscope",
+        meta: data.horoscope?.date || (sun ? `${sun.element} · ${sun.dates}` : ""),
+        body: data.horoscope?.text || "Today's horoscope is unavailable right now.",
+        source: data.horoscope,
+        ok: data.horoscope?.ok,
+      })}
+      ${renderTodayCard({
+        eyebrow: "Human Design",
+        title: hdImpact.title || "Human Design Daily Impact",
+        meta: [
+          hd?.name,
+          me.hdAuthority && `${me.hdAuthority} authority`,
+          me.hdProfile && `${me.hdProfile} profile`,
+          hdImpact.date,
+        ].filter(Boolean).join(" · "),
+        body: hdImpact.text || "Today's Human Design impact is unavailable right now.",
+        source: hdImpact,
+        ok: hdImpact.ok,
+        extra: hdExtraParts.length ? `<ul class="today-facts">${hdExtraParts.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : "",
+      })}
+      ${renderTodayCard({
+        eyebrow: "Chinese zodiac",
+        title: cn ? `${cn.emoji} ${cn.name} year guidance` : "Chinese zodiac year",
+        meta: [me.chineseElement && `${me.chineseElement} element`, me.birthDate && `Born ${me.birthDate.slice(0, 4)}`].filter(Boolean).join(" · "),
+        body: data.chinese?.text || `${cn?.traits || "Your Chinese year reference is unavailable right now."}`,
+        source: data.chinese,
+        ok: data.chinese?.ok,
+      })}
+    </div>
+    <p class="today-note">Daily sources can change their markup or availability; cached server fetches keep this page fast and avoid browser-side CORS scraping.</p>
+  `;
+  translatePage(app);
+}
+
+function renderToday() {
+  const me = getMyProfile();
+  if (!me) {
+    app.innerHTML = `
+      <div class="empty-state card">
+        <h2 class="section-title">Your daily cosmic weather</h2>
+        <p>Create a profile first so Today can personalize your horoscope, Human Design, and Chinese zodiac guidance.</p>
+        <button type="button" class="btn btn-primary" data-nav="create">Create profile</button>
+      </div>
+    `;
+    return;
+  }
+
+  const sun = getZodiacById(me.sunSign || me.zodiac);
+  const hd = getHdTypeById(me.hdType);
+  const cn = getChineseById(me.chineseAnimal);
+  const requestId = ++todayRequestId;
+  app.innerHTML = `
+    <section class="today-hero card">
+      <span class="hero-badge">Today</span>
+      <h1>Your daily cosmic weather</h1>
+      <p>Loading live daily insights for ${esc(me.name || "your profile")}.</p>
+      <div class="cosmic-tags">
+        ${sun ? `<span class="tag zodiac">${sun.symbol} ${sun.name}</span>` : ""}
+        ${hd ? `<span class="tag hd">${hd.name}</span>` : ""}
+        ${cn ? `<span class="tag chinese">${cn.emoji} ${cn.name}</span>` : ""}
+      </div>
+      <p class="today-loading">Consulting today&apos;s sources...</p>
+    </section>
+  `;
+
+  fetchTodayInsights(me)
+    .then((data) => {
+      if (route === "today" && requestId === todayRequestId) renderTodayContent(me, data);
+    })
+    .catch((e) => {
+      if (route !== "today" || requestId !== todayRequestId) return;
+      app.innerHTML = `
+        <div class="empty-state card">
+          <h2 class="section-title">Today is cloudy</h2>
+          <p>${esc(e.message || "Daily insights are unavailable right now.")}</p>
+          <button type="button" class="btn btn-secondary" data-nav="profile">Review my profile</button>
+        </div>
+      `;
+      bindGlobalNav();
+    });
 }
 
 function renderHome() {
@@ -688,6 +823,9 @@ function render() {
       break;
     case "discover":
       renderDiscover();
+      break;
+    case "today":
+      renderToday();
       break;
     case "profile":
       renderMyProfile();

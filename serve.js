@@ -5,6 +5,9 @@ const path = require("path");
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT) || 8765;
 const DATABASE_URL = process.env.DATABASE_URL;
+const USER_AGENT = "CosmicDating/1.0 (+https://soul-connect-b95n.onrender.com)";
+const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -22,6 +25,37 @@ async function getAstro() {
 
 let dbPool = null;
 let dbReady = false;
+const scrapeCache = new Map();
+
+const ZODIAC_SIGN_NUMBERS = {
+  aries: 1,
+  taurus: 2,
+  gemini: 3,
+  cancer: 4,
+  leo: 5,
+  virgo: 6,
+  libra: 7,
+  scorpio: 8,
+  sagittarius: 9,
+  capricorn: 10,
+  aquarius: 11,
+  pisces: 12,
+};
+
+const CHINESE_TRAITS = {
+  rat: "Clever, resourceful",
+  ox: "Steady, dependable",
+  tiger: "Brave, passionate",
+  rabbit: "Gentle, diplomatic",
+  dragon: "Charismatic, bold",
+  snake: "Wise, intuitive",
+  horse: "Energetic, free-spirited",
+  goat: "Creative, empathetic",
+  monkey: "Playful, inventive",
+  rooster: "Honest, observant",
+  dog: "Loyal, sincere",
+  pig: "Generous, warm-hearted",
+};
 
 async function getDb() {
   if (!DATABASE_URL) return null;
@@ -64,6 +98,202 @@ function readBody(req) {
 function sendJson(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
+}
+
+function decodeHtml(value = "") {
+  return value
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&rsquo;|&lsquo;/g, "'")
+    .replace(/&rdquo;|&ldquo;/g, '"')
+    .replace(/&ndash;|&mdash;/g, "-")
+    .replace(/&nbsp;/g, " ");
+}
+
+function htmlToText(html = "") {
+  return decodeHtml(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<\/(p|div|section|article|h[1-6]|li|br)>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+  )
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function fetchCached(key, url, ttlMs) {
+  const cached = scrapeCache.get(key);
+  if (cached && Date.now() - cached.at < ttlMs) return cached.value;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Source returned ${res.status}`);
+    const value = await res.text();
+    scrapeCache.set(key, { at: Date.now(), value });
+    return value;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function scrapeHoroscope(signId) {
+  const sign = String(signId || "").toLowerCase();
+  const signNumber = ZODIAC_SIGN_NUMBERS[sign];
+  const sourceUrl = "https://www.horoscope.com/us/horoscopes/general/index-horoscope-general-daily.aspx";
+  if (!signNumber) {
+    return {
+      ok: false,
+      sourceUrl,
+      title: "Daily horoscope",
+      text: "Add your Sun sign to your profile to receive a personalized daily horoscope.",
+    };
+  }
+
+  try {
+    const signUrl = `https://www.horoscope.com/us/horoscopes/general/horoscope-general-daily-today.aspx?sign=${signNumber}`;
+    const html = await fetchCached(`horoscope:${sign}`, signUrl, 6 * HOUR_MS);
+    const dated = html.match(/<p>\s*<strong>([^<]+)<\/strong>\s*-\s*([\s\S]*?)<\/p>/i);
+    const meta = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+    const date = dated ? decodeHtml(dated[1]).trim() : null;
+    const text = decodeHtml((dated ? dated[2] : meta?.[1] || "").replace(/<[^>]+>/g, " "))
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!text) throw new Error("Horoscope text not found");
+    return {
+      ok: true,
+      sourceUrl,
+      detailUrl: signUrl,
+      title: `${sign[0].toUpperCase()}${sign.slice(1)} daily horoscope`,
+      date,
+      text,
+    };
+  } catch {
+    return {
+      ok: false,
+      sourceUrl,
+      title: "Daily horoscope",
+      text: "Today's horoscope source is unavailable right now. Check back soon for your Sun sign reading.",
+    };
+  }
+}
+
+function matchLine(text, pattern) {
+  const match = text.match(pattern);
+  return match ? match[1].replace(/\s+/g, " ").trim() : null;
+}
+
+async function scrapeHumanDesign() {
+  const sourceUrl = "https://human.design/daily-impact";
+  try {
+    const html = await fetchCached("human-design:daily-impact", sourceUrl, 2 * HOUR_MS);
+    const text = htmlToText(html);
+    const date = matchLine(text, /([A-Z][a-z]+ \d{1,2}, \d{4}\s*\|\s*[^|\n]+\|\s*UTC)/);
+    const gate = matchLine(text, /(Gate\s+\d+\s*-\s*THE GATE OF [A-Z ]+?)(?:\s+Keynote|\n|$)/i);
+    const bodygraph = matchLine(text, /Bodygraph Position\s+(.+?)(?:\s+Quarter|\n|$)/i);
+    const line = matchLine(text, /Impact Line for Gate\s+\d+\s*\|\s*Line\s+(\d+)/i);
+    const lineName = matchLine(text, /Line Name\s+(.+?)(?:\s+Line Heading|\n|$)/i);
+    const lineHeading = matchLine(text, /Line Heading\s+(.+?)(?:\s+Detriment|\n|$)/i);
+    const exaltation = matchLine(text, /Exaltation\s+(.+?)(?:\s+See More|\n|$)/i);
+    const harmonicGate = matchLine(text, /Harmonic Gate\s+(.+?)(?:\s+\d+(st|nd|rd|th) Line Day|\n|$)/i);
+
+    if (!gate && !lineHeading) throw new Error("Daily Impact details not found");
+    return {
+      ok: true,
+      sourceUrl,
+      title: "Human Design Daily Impact",
+      date,
+      gate,
+      bodygraph,
+      line,
+      lineName,
+      lineHeading,
+      harmonicGate,
+      text: [lineHeading, exaltation].filter(Boolean).join(" "),
+    };
+  } catch {
+    return {
+      ok: false,
+      sourceUrl,
+      title: "Human Design Daily Impact",
+      text: "Human Design's Daily Impact source is unavailable right now. Follow your strategy and authority as today's steady anchor.",
+    };
+  }
+}
+
+async function scrapeChineseReference({ animal, element, birthYear }) {
+  const sourceUrl = "https://www.timeanddate.com/calendar/chinese-zodiac-signs.html";
+  const localTraits = CHINESE_TRAITS[animal] || "Your Chinese year adds another layer of instinct, timing, and temperament.";
+  let reference = "";
+  let sourceAvailable = false;
+
+  try {
+    const html = await fetchCached("chinese-zodiac:timeanddate", sourceUrl, 7 * DAY_MS);
+    const text = htmlToText(html);
+    sourceAvailable = /Chinese Zodiac/i.test(text);
+    if (animal) {
+      const animalName = animal[0].toUpperCase() + animal.slice(1);
+      const animalLine = text
+        .split("\n")
+        .find((line) => line.includes(animalName) && /Year|Zodiac|personality|traits/i.test(line));
+      reference = animalLine || "";
+    }
+  } catch {
+    sourceAvailable = false;
+  }
+
+  return {
+    ok: sourceAvailable,
+    sourceUrl,
+    title: "Chinese zodiac year",
+    animal,
+    element,
+    birthYear,
+    traits: localTraits,
+    text: reference || `${element ? `${element} ` : ""}${animal || "Chinese zodiac"} energy: ${localTraits}. This reference is based on your saved profile year/sign data.`,
+  };
+}
+
+async function handleToday(url) {
+  const zodiac = url.searchParams.get("zodiac");
+  const hdType = url.searchParams.get("hdType");
+  const hdAuthority = url.searchParams.get("hdAuthority");
+  const hdProfile = url.searchParams.get("hdProfile");
+  const chineseAnimal = url.searchParams.get("chineseAnimal");
+  const chineseElement = url.searchParams.get("chineseElement");
+  const birthYear = url.searchParams.get("birthYear");
+
+  const [horoscope, humanDesign, chinese] = await Promise.all([
+    scrapeHoroscope(zodiac),
+    scrapeHumanDesign(),
+    scrapeChineseReference({
+      animal: chineseAnimal,
+      element: chineseElement,
+      birthYear,
+    }),
+  ]);
+
+  return {
+    status: 200,
+    body: {
+      generatedAt: new Date().toISOString(),
+      profile: { zodiac, hdType, hdAuthority, hdProfile, chineseAnimal, chineseElement, birthYear },
+      horoscope,
+      humanDesign,
+      chinese,
+    },
+  };
 }
 
 async function handleProfiles(req, url) {
@@ -254,6 +484,15 @@ http
       }
     }
 
+    if (url.pathname === "/api/today" && req.method === "GET") {
+      try {
+        const out = await handleToday(url);
+        return sendJson(res, out.status, out.body);
+      } catch (e) {
+        return sendJson(res, 500, { error: e.message || "Today insights failed" });
+      }
+    }
+
     if (url.pathname === "/api/profiles" || url.pathname.startsWith("/api/profiles/")) {
       try {
         const out = await handleProfiles(req, url);
@@ -285,6 +524,6 @@ http
   })
   .listen(PORT, () => {
     console.log(`Cosmic Dating -> http://localhost:${PORT}`);
-    console.log(`Astro API: POST /api/natal · GET /api/geocode?q=City`);
+    console.log(`Astro API: POST /api/natal · GET /api/geocode?q=City · GET /api/today`);
     console.log(DATABASE_URL ? "Profile DB: PostgreSQL enabled" : "Profile DB: localStorage fallback");
   });

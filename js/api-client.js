@@ -28,3 +28,22 @@ export async function fetchNatalChart({ birthDate, birthTime, latitude, longitud
   }
   return res.json();
 }
+
+export async function fetchTodayInsights(profile) {
+  const params = new URLSearchParams();
+  const zodiac = profile.sunSign || profile.zodiac;
+  if (zodiac) params.set("zodiac", zodiac);
+  if (profile.hdType) params.set("hdType", profile.hdType);
+  if (profile.hdAuthority) params.set("hdAuthority", profile.hdAuthority);
+  if (profile.hdProfile) params.set("hdProfile", profile.hdProfile);
+  if (profile.chineseAnimal) params.set("chineseAnimal", profile.chineseAnimal);
+  if (profile.chineseElement) params.set("chineseElement", profile.chineseElement);
+  if (profile.birthDate) params.set("birthYear", profile.birthDate.slice(0, 4));
+
+  const res = await fetch(`/api/today?${params.toString()}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Today insights failed");
+  }
+  return res.json();
+}

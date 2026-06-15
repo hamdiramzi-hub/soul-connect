@@ -667,6 +667,104 @@ html[dir="rtl"] .form-row {
   color: var(--text-card-muted);
 }
 
+/* Today */
+.today-hero {
+  margin-bottom: 1.5rem;
+  background:
+    linear-gradient(135deg, rgba(245, 245, 245, 0.84), rgba(237, 191, 204, 0.7)),
+    var(--bg-card);
+}
+
+.today-hero h1 {
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 5vw, 3.3rem);
+  line-height: 1.08;
+  margin: 0 0 0.75rem;
+  color: var(--text-strong);
+}
+
+.today-hero p {
+  max-width: 680px;
+  color: var(--text-card-muted);
+}
+
+.today-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.25rem;
+}
+
+.today-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.today-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.today-eyebrow {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--sand-deep);
+}
+
+.today-card h3 {
+  font-family: var(--font-display);
+  font-size: 1.45rem;
+  margin: 0 0 0.4rem;
+}
+
+.today-meta,
+.today-note,
+.today-loading {
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.daily-text {
+  color: var(--text-strong);
+  font-size: 0.96rem;
+}
+
+.today-facts {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0 1rem;
+}
+
+.today-facts li {
+  padding: 0.4rem 0;
+  border-bottom: 1px solid rgba(88, 127, 218, 0.14);
+  color: var(--text-card-muted);
+  font-size: 0.86rem;
+}
+
+.source-link {
+  margin-top: auto;
+  align-self: flex-start;
+  color: var(--blue);
+  font-weight: 600;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(88, 127, 218, 0.35);
+}
+
+.source-link:hover {
+  border-color: var(--blue);
+}
+
+.today-note {
+  margin-top: 1rem;
+  color: var(--text-muted);
+}
+
 .hidden { display: none !important; }
 
 .match-list {
