@@ -117,8 +117,156 @@ function isCreateCosmicStep() {
   return route === "create" && wizardStep === 1;
 }
 
+function cosmicFormActive() {
+  return Boolean(document.getElementById("birthCountry"));
+}
+
+function cityOptionsHtml(d) {
+  const cityQuery = String(d.birthCityQuery || "").trim();
+  const cities = currentBirthCities(d.birthCountry, cityQuery);
+  const selectedCityMissing = d.birthCity && d.birthCity !== OTHER_CITY_VALUE && !cities.includes(d.birthCity);
+  return [
+    `<option value="">${cityQuery.length >= 2 ? "Select city..." : "Search first..."}</option>`,
+    ...cities.map((city) => `<option value="${esc(city)}"${d.birthCity === city ? " selected" : ""}>${esc(city)}</option>`),
+    ...(selectedCityMissing ? [`<option value="${esc(d.birthCity)}" selected>${esc(d.birthCity)}</option>`] : []),
+    `<option value="${OTHER_CITY_VALUE}"${d.birthCity === OTHER_CITY_VALUE ? " selected" : ""}>Other city...</option>`,
+  ].join("");
+}
+
+function isCityLoading(country, query = "") {
+  if (!country) return false;
+  const cacheKey = query.trim().length >= 2 ? `${country}::${query.trim().toLowerCase()}` : country;
+  return birthLocationState.cityLoadingCountry === cacheKey;
+}
+
+function updateBirthDateUi() {
+  collectWizardForm();
+  wizardDraft.birthDate = buildBirthDate(wizardDraft);
+  const birthDateInput = document.getElementById("birthDate");
+  if (birthDateInput) birthDateInput.value = wizardDraft.birthDate || "";
+  const age = calculateAge(wizardDraft.birthDate, wizardDraft.birthTime);
+  const ageHint = document.getElementById("birth-age-hint");
+  if (ageHint) {
+    ageHint.textContent = `Age is calculated from this date${age != null ? `: ${age}` : ""}. We never ask you to type it.`;
+  }
+  syncCalculatedFieldsFromBirthChange();
+}
+
+function syncCalculatedFieldsFromBirthChange() {
+  wizardDraft.birthPlace = buildBirthPlace(wizardDraft);
+  if (wizardDraft.birthDate !== wizardDraft._calculatedBirthDate ||
+    wizardDraft.birthTime !== wizardDraft._calculatedBirthTime ||
+    wizardDraft.birthPlace !== wizardDraft._calculatedBirthPlace) {
+    clearCalculatedBirthFields();
+    updateCalculatedChartUi();
+  }
+  updateBirthPlaceUi();
+}
+
+function updateCountrySelectOptions() {
+  const country = document.getElementById("birthCountry");
+  if (!country || document.activeElement === country) return;
+  const selected = wizardDraft.birthCountry || country.value;
+  const countries = sortUniqueStrings([...currentBirthCountries(), selected].filter(Boolean));
+  country.innerHTML = [
+    '<option value="">Select country...</option>',
+    ...countries.map((item) => `<option value="${esc(item)}"${selected === item ? " selected" : ""}>${esc(item)}</option>`),
+  ].join("");
+}
+
+function updateBirthPlaceUi() {
+  collectWizardForm();
+  wizardDraft.birthPlace = buildBirthPlace(wizardDraft);
+  const hidden = document.getElementById("birthPlace");
+  if (hidden) hidden.value = wizardDraft.birthPlace || "";
+  const text = document.getElementById("selected-birth-place");
+  if (text) {
+    text.textContent = wizardDraft.birthPlace
+      ? `Selected birth place: ${wizardDraft.birthPlace}`
+      : "Selected birth place: Choose country and city";
+  }
+}
+
+function updateLocationStatusUi() {
+  const status = document.getElementById("location-status");
+  if (!status) return;
+  const message = [
+    birthLocationState.countriesLoading && "Loading all countries...",
+    birthLocationState.countriesError && "Using the local country fallback for now.",
+    birthLocationState.cityErrors.get(wizardDraft.birthCountry) && "City list unavailable for this country; choose Other city if needed.",
+  ].filter(Boolean).join(" ");
+  status.textContent = message;
+  status.hidden = !message;
+}
+
+function updateCalculatedChartUi() {
+  const d = wizardDraft;
+  const sun = getZodiacById(d.sunSign);
+  const moon = getZodiacById(d.moonSign);
+  const rising = getZodiacById(d.risingSign);
+  const chinese = getChineseById(d.chineseAnimal);
+  const hdDisplay = humanDesignDisplay(d);
+  const western = document.getElementById("calc-western");
+  const chineseEl = document.getElementById("calc-chinese");
+  const hdEl = document.getElementById("calc-hd");
+  const chartStatus = document.getElementById("chart-status");
+  if (western) {
+    western.querySelector(".value").textContent = sun ? `☉ ${sun.symbol} ${sun.name}` : "Not calculated";
+    western.querySelector(".details").textContent = `${moon ? `☽ ${moon.name}` : "Moon pending"}${rising ? ` · ↑ ${rising.name}` : " · Rising pending"}`;
+  }
+  if (chineseEl) {
+    chineseEl.querySelector(".value").textContent = chinese ? `${chinese.emoji} ${chinese.name}` : "Not calculated";
+    chineseEl.querySelector(".details").textContent = d.chineseElement || "Element pending";
+  }
+  if (hdEl) {
+    hdEl.querySelector(".value").textContent = d.hdType ? (getHdTypeById(d.hdType)?.name || d.hdType) : "Not calculated";
+    hdEl.querySelector(".details").textContent = hdDisplay.details || hdDisplay.status;
+    const source = hdEl.querySelector(".source");
+    if (source) {
+      source.textContent = hdDisplay.source ? `Source: ${hdDisplay.source}` : "";
+      source.hidden = !hdDisplay.source;
+    }
+  }
+  if (chartStatus && hasCalculatedChart(d)) {
+    chartStatus.textContent = `Calculated from birth data: ☉ ${sun?.name || d.sunSign}${moon ? ` · ☽ ${moon.name}` : ""}${rising ? ` · ↑ ${rising.name}` : ""}`;
+  }
+}
+
+function updateCosmicLocationUi() {
+  if (!cosmicFormActive()) return;
+  updateCountrySelectOptions();
+  const d = wizardDraft;
+  const cityQueryEl = document.getElementById("birthCityQuery");
+  const cityEl = document.getElementById("birthCity");
+  const cityOtherWrap = document.getElementById("birth-city-other-wrap");
+  const cityOther = document.getElementById("birthCityOther");
+  const cityQuery = String(d.birthCityQuery || "").trim();
+  const cityLoading = isCityLoading(d.birthCountry, cityQuery);
+  const citySearchHint = document.getElementById("city-search-hint");
+
+  if (cityQueryEl) {
+    cityQueryEl.disabled = !d.birthCountry;
+    if (document.activeElement !== cityQueryEl) cityQueryEl.value = d.birthCityQuery || "";
+  }
+  if (cityEl) {
+    cityEl.disabled = !d.birthCountry || cityLoading || (cityQuery.length < 2 && d.birthCity !== OTHER_CITY_VALUE);
+    if (document.activeElement !== cityEl) {
+      cityEl.innerHTML = cityLoading ? '<option value="">Loading cities...</option>' : cityOptionsHtml(d);
+    }
+  }
+  if (cityOtherWrap) cityOtherWrap.classList.toggle("hidden", d.birthCity !== OTHER_CITY_VALUE);
+  if (cityOther && document.activeElement !== cityOther) cityOther.value = d.birthCityOther || "";
+  if (citySearchHint) {
+    citySearchHint.textContent = cityLoading
+      ? "Loading matching cities..."
+      : "Type at least 2 letters, then choose from Select city.";
+  }
+  updateBirthPlaceUi();
+  updateLocationStatusUi();
+}
+
 function rerenderCreateCosmicStep() {
-  if (isCreateCosmicStep()) renderCreate();
+  if (isCreateCosmicStep()) updateCosmicLocationUi();
 }
 
 async function loadBirthCountries(force = false) {
@@ -842,7 +990,7 @@ function renderCreate() {
           </select>
         </div>
         <input id="birthDate" name="birthDate" type="hidden" value="${esc(buildBirthDate(d) || d.birthDate || "")}" />
-        <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">
+        <p id="birth-age-hint" style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">
           Age is calculated from this date${age != null ? `: ${age}` : ""}. We never ask you to type it.
         </p>
       </div>
@@ -864,7 +1012,7 @@ function renderCreate() {
         <div class="form-group">
           <label for="birthCityQuery">Search birth city</label>
           <input id="birthCityQuery" name="birthCityQuery" value="${esc(d.birthCityQuery || "")}" placeholder="Type city name, e.g. Zurich" ${d.birthCountry ? "" : "disabled"} />
-          <p style="font-size:0.72rem;color:var(--text-muted);margin-top:0.25rem">${cityLoading ? "Loading matching cities..." : "Type at least 2 letters, then choose from Select city."}</p>
+          <p id="city-search-hint" style="font-size:0.72rem;color:var(--text-muted);margin-top:0.25rem">${cityLoading ? "Loading matching cities..." : "Type at least 2 letters, then choose from Select city."}</p>
         </div>
         <div class="form-group">
           <label for="birthCity">Select city</label>
@@ -877,9 +1025,9 @@ function renderCreate() {
           <input id="birthCityOther" name="birthCityOther" value="${esc(d.birthCityOther || "")}" placeholder="Type your birth city" />
         </div>
       </div>
-      ${locationStatus ? `<p style="font-size:0.76rem;color:var(--text-muted);margin:-0.4rem 0 0.75rem">${esc(locationStatus)}</p>` : ""}
-      <p style="font-size:0.78rem;color:var(--text-muted);margin:-0.25rem 0 1rem">
-        Selected birth place: ${selectedBirthPlace ? esc(selectedBirthPlace) : "Choose country and city"}
+      ${locationStatus ? `<p id="location-status" style="font-size:0.76rem;color:var(--text-muted);margin:-0.4rem 0 0.75rem">${esc(locationStatus)}</p>` : '<p id="location-status" hidden style="font-size:0.76rem;color:var(--text-muted);margin:-0.4rem 0 0.75rem"></p>'}
+      <p id="selected-birth-place" style="font-size:0.78rem;color:var(--text-muted);margin:-0.25rem 0 1rem">
+        ${selectedBirthPlace ? `Selected birth place: ${esc(selectedBirthPlace)}` : "Selected birth place: Choose country and city"}
       </p>
       <input type="hidden" id="birthPlace" name="birthPlace" value="${esc(selectedBirthPlace)}" />
       <input type="hidden" id="birthLatitude" name="birthLatitude" value="${esc(d.birthLatitude ?? "")}" />
@@ -888,25 +1036,25 @@ function renderCreate() {
       <p id="chart-status" style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem">${esc(chartHint)}</p>
       <button type="button" class="btn btn-secondary btn-sm" id="btn-calc-chart" style="margin-bottom:1.25rem">Calculate from birth date, time & place</button>
       <div class="calculated-grid">
-        <div class="cosmic-item">
+        <div class="cosmic-item" id="calc-western">
           <div class="label">Western chart</div>
           <div class="value">${sun ? `☉ ${sun.symbol} ${sun.name}` : "Not calculated"}</div>
-          <p style="font-size:0.78rem;color:var(--text-muted);margin:0.25rem 0 0">
+          <p class="details" style="font-size:0.78rem;color:var(--text-muted);margin:0.25rem 0 0">
             ${moon ? `☽ ${moon.name}` : "Moon pending"}${rising ? ` · ↑ ${rising.name}` : " · Rising pending"}
           </p>
         </div>
-        <div class="cosmic-item">
+        <div class="cosmic-item" id="calc-chinese">
           <div class="label">Chinese zodiac</div>
           <div class="value">${chinese ? `${chinese.emoji} ${chinese.name}` : "Not calculated"}</div>
-          <p style="font-size:0.78rem;color:var(--text-muted);margin:0.25rem 0 0">${esc(d.chineseElement || "Element pending")}</p>
+          <p class="details" style="font-size:0.78rem;color:var(--text-muted);margin:0.25rem 0 0">${esc(d.chineseElement || "Element pending")}</p>
         </div>
-        <div class="cosmic-item">
+        <div class="cosmic-item" id="calc-hd">
           <div class="label">Human Design</div>
           <div class="value">${d.hdType ? esc(getHdTypeById(d.hdType)?.name || d.hdType) : "Not calculated"}</div>
-          <p style="font-size:0.78rem;color:var(--text-muted);margin:0.25rem 0 0">
+          <p class="details" style="font-size:0.78rem;color:var(--text-muted);margin:0.25rem 0 0">
             ${hdDisplay.details ? esc(hdDisplay.details) : esc(hdDisplay.status)}
           </p>
-          ${hdDisplay.source ? `<p style="font-size:0.72rem;color:var(--blue);margin:0.25rem 0 0">Source: ${esc(hdDisplay.source)}</p>` : ""}
+          <p class="source" style="font-size:0.72rem;color:var(--blue);margin:0.25rem 0 0"${hdDisplay.source ? "" : " hidden"}>${hdDisplay.source ? `Source: ${esc(hdDisplay.source)}` : ""}</p>
         </div>
       </div>
     `;
@@ -949,7 +1097,7 @@ function renderCreate() {
   if (wizardStep === 1) {
     bindBirthLocationSelectors();
     bindChartCalculator();
-    loadBirthCountries(true);
+    loadBirthCountries(false);
     if (d.birthCountry && cityQuery.length >= 2) loadBirthCities(d.birthCountry, cityQuery);
   }
   document.getElementById("wizard-back")?.addEventListener("click", () => {
@@ -1030,17 +1178,15 @@ function bindBirthLocationSelectors() {
   const birthMonth = document.getElementById("birthMonth");
   const birthDay = document.getElementById("birthDay");
   const birthYear = document.getElementById("birthYear");
+  const birthTime = document.getElementById("birthTime");
   const country = document.getElementById("birthCountry");
   const cityQuery = document.getElementById("birthCityQuery");
   const city = document.getElementById("birthCity");
   const cityOther = document.getElementById("birthCityOther");
   [birthMonth, birthDay, birthYear].forEach((el) => {
-    el?.addEventListener("change", () => {
-      collectWizardForm();
-      clearCalculatedBirthFields();
-      renderCreate();
-    });
+    el?.addEventListener("change", () => updateBirthDateUi());
   });
+  birthTime?.addEventListener("change", () => syncCalculatedFieldsFromBirthChange());
   country?.addEventListener("change", () => {
     collectWizardForm();
     wizardDraft.birthCountry = country.value;
@@ -1048,7 +1194,8 @@ function bindBirthLocationSelectors() {
     wizardDraft.birthCity = "";
     wizardDraft.birthCityOther = "";
     clearCalculatedBirthFields();
-    renderCreate();
+    updateCosmicLocationUi();
+    updateCalculatedChartUi();
   });
   let citySearchTimer;
   cityQuery?.addEventListener("input", () => {
@@ -1057,7 +1204,9 @@ function bindBirthLocationSelectors() {
     wizardDraft.birthCity = "";
     wizardDraft.birthCityOther = "";
     clearCalculatedBirthFields();
+    updateCalculatedChartUi();
     const q = cityQuery.value.trim();
+    updateCosmicLocationUi();
     if (wizardDraft.birthCountry && q.length >= 2) {
       const cacheKey = `${wizardDraft.birthCountry}::${q.toLowerCase()}`;
       birthLocationState.cityLoads.delete(cacheKey);
@@ -1069,12 +1218,12 @@ function bindBirthLocationSelectors() {
     wizardDraft.birthCity = city.value;
     if (city.value !== OTHER_CITY_VALUE) wizardDraft.birthCityOther = "";
     clearCalculatedBirthFields();
-    renderCreate();
+    updateCosmicLocationUi();
+    updateCalculatedChartUi();
   });
-  cityOther?.addEventListener("change", () => {
-    collectWizardForm();
-    clearCalculatedBirthFields();
-    renderCreate();
+  cityOther?.addEventListener("input", () => {
+    wizardDraft.birthCityOther = cityOther.value;
+    syncCalculatedFieldsFromBirthChange();
   });
 }
 
@@ -1179,7 +1328,7 @@ async function bindChartCalculator() {
           ? `Calculated: ${parts.join(" · ")}${getMyProfile() ? " · Saved to your profile" : ""}`
           : "Calculation finished.";
       }
-      renderCreate();
+      updateCalculatedChartUi();
     } catch (e) {
       if (status) status.textContent = e.message || "Chart failed. Use node serve.js (not file://).";
     } finally {
