@@ -18,8 +18,10 @@ export async function fetchCountries() {
   return res.json();
 }
 
-export async function fetchCities(country) {
-  const res = await fetch(`/api/cities?country=${encodeURIComponent(country)}`);
+export async function fetchCities(country, query = "") {
+  const params = new URLSearchParams({ country });
+  if (query) params.set("q", query);
+  const res = await fetch(`/api/cities?${params.toString()}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || "Could not load cities");

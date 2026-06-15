@@ -32,6 +32,7 @@ let locationRequestId = 0;
 
 const WIZARD_STEPS = ["Basics", "Cosmic self", "Preferences"];
 const OTHER_CITY_VALUE = "__other__";
+const COUNTRIES_CACHE_KEY = "cosmic-countries-v1";
 const LOCAL_COUNTRIES = BIRTH_LOCATIONS.map((item) => item.country);
 const birthLocationState = {
   countries: LOCAL_COUNTRIES,
@@ -55,8 +56,13 @@ function currentBirthCountries() {
   return sortUniqueStrings([...LOCAL_COUNTRIES, ...birthLocationState.countries]);
 }
 
-function currentBirthCities(country) {
+function currentBirthCities(country, query = "") {
   if (!country) return [];
+  const searchKey = query.length >= 2 ? `${country}::${query.toLowerCase()}` : "";
+  if (searchKey) {
+    const searched = birthLocationState.citiesByCountry.get(searchKey);
+    if (searched?.length) return searched;
+  }
   const loaded = birthLocationState.citiesByCountry.get(country);
   return loaded?.length ? loaded : getCitiesForCountry(country);
 }
@@ -69,16 +75,41 @@ function rerenderCreateCosmicStep() {
   if (isCreateCosmicStep()) renderCreate();
 }
 
-async function loadBirthCountries() {
-  if (birthLocationState.countriesLoaded || birthLocationState.countriesLoading) return;
+async function loadBirthCountries(force = false) {
+  if (!birthLocationState.countriesLoaded) {
+    try {
+      const cached = sessionStorage.getItem(COUNTRIES_CACHE_KEY);
+      if (cached) {
+        const list = JSON.parse(cached);
+        if (Array.isArray(list) && list.length) {
+          birthLocationState.countries = sortUniqueStrings([...LOCAL_COUNTRIES, ...list]);
+          birthLocationState.countriesLoaded = true;
+          rerenderCreateCosmicStep();
+        }
+      }
+    } catch {
+      /* ignore cache parse errors */
+    }
+  }
+  if (birthLocationState.countriesLoading) return;
+  if (!force && birthLocationState.countriesLoaded && birthLocationState.countries.length > LOCAL_COUNTRIES.length) return;
+
   birthLocationState.countriesLoading = true;
   birthLocationState.countriesError = "";
   const requestId = ++locationRequestId;
   try {
     const data = await fetchCountries();
     if (requestId !== locationRequestId) return;
-    birthLocationState.countries = currentBirthCountries().concat(data.countries || []);
+    const countries = sortUniqueStrings(data.countries || []);
+    birthLocationState.countries = sortUniqueStrings([...LOCAL_COUNTRIES, ...countries]);
     birthLocationState.countriesLoaded = true;
+    if (countries.length) {
+      try {
+        sessionStorage.setItem(COUNTRIES_CACHE_KEY, JSON.stringify(countries));
+      } catch {
+        /* ignore storage quota errors */
+      }
+    }
   } catch (e) {
     birthLocationState.countriesError = e.message || "Using local country list.";
     birthLocationState.countriesLoaded = true;
@@ -88,23 +119,28 @@ async function loadBirthCountries() {
   }
 }
 
-async function loadBirthCities(country) {
-  if (!country || birthLocationState.cityLoads.has(country) || birthLocationState.cityLoadingCountry === country) return;
-  birthLocationState.cityLoadingCountry = country;
+async function loadBirthCities(country, query = "") {
+  if (!country) return;
+  const normalizedQuery = query.trim().toLowerCase();
+  const cacheKey = normalizedQuery.length >= 2 ? `${country}::${normalizedQuery}` : country;
+  if (birthLocationState.cityLoads.has(cacheKey) || birthLocationState.cityLoadingCountry === cacheKey) return;
+  birthLocationState.cityLoadingCountry = cacheKey;
   birthLocationState.cityErrors.delete(country);
   try {
-    const data = await fetchCities(country);
+    const data = await fetchCities(country, normalizedQuery.length >= 2 ? query.trim() : "");
     const resolvedCountry = data.country || country;
-    birthLocationState.citiesByCountry.set(resolvedCountry, sortUniqueStrings(data.cities || []));
-    if (resolvedCountry !== country) {
-      birthLocationState.citiesByCountry.set(country, birthLocationState.citiesByCountry.get(resolvedCountry) || []);
+    const cities = sortUniqueStrings(data.cities || []);
+    birthLocationState.citiesByCountry.set(cacheKey, cities);
+    if (!normalizedQuery) {
+      birthLocationState.citiesByCountry.set(resolvedCountry, cities);
+      if (resolvedCountry !== country) birthLocationState.citiesByCountry.set(country, cities);
     }
-    birthLocationState.cityLoads.add(country);
+    birthLocationState.cityLoads.add(cacheKey);
   } catch (e) {
     birthLocationState.cityErrors.set(country, e.message || "Using local city list.");
-    birthLocationState.cityLoads.add(country);
+    birthLocationState.cityLoads.add(cacheKey);
   } finally {
-    if (birthLocationState.cityLoadingCountry === country) birthLocationState.cityLoadingCountry = "";
+    if (birthLocationState.cityLoadingCountry === cacheKey) birthLocationState.cityLoadingCountry = "";
     rerenderCreateCosmicStep();
   }
 }
@@ -139,7 +175,7 @@ function hasCalculatedChart(d) {
 }
 
 function buildBirthPlace(d) {
-  const city = d.birthCity === OTHER_CITY_VALUE ? d.birthCityOther : d.birthCity;
+  const city = String(d.birthCity === OTHER_CITY_VALUE ? d.birthCityOther : d.birthCity || d.birthCityOther || "").trim();
   if (!city || !d.birthCountry) return "";
   return `${city}, ${d.birthCountry}`;
 }
@@ -716,15 +752,12 @@ function renderCreate() {
     const countriesHtml = countries
       .map((country) => `<option value="${esc(country)}"${d.birthCountry === country ? " selected" : ""}>${esc(country)}</option>`)
       .join("");
-    const cities = currentBirthCities(d.birthCountry);
-    const selectedCityMissing = d.birthCity && d.birthCity !== OTHER_CITY_VALUE && !cities.includes(d.birthCity);
-    const cityOptionsHtml = [
-      '<option value="">Select city...</option>',
-      ...(birthLocationState.cityLoadingCountry === d.birthCountry ? ['<option value="" disabled>Loading cities...</option>'] : []),
-      ...cities.map((city) => `<option value="${esc(city)}"${d.birthCity === city ? " selected" : ""}>${esc(city)}</option>`),
-      ...(selectedCityMissing ? [`<option value="${esc(d.birthCity)}" selected>${esc(d.birthCity)}</option>`] : []),
-      `<option value="${OTHER_CITY_VALUE}"${d.birthCity === OTHER_CITY_VALUE ? " selected" : ""}>Other city...</option>`,
-    ].join("");
+    const cities = currentBirthCities(d.birthCountry, d.birthCity || "");
+    const cityOptionsHtml = cities.map((city) => `<option value="${esc(city)}">`).join("");
+    const cityLoading = Boolean(d.birthCountry) && (
+      birthLocationState.cityLoadingCountry === d.birthCountry ||
+      birthLocationState.cityLoadingCountry.startsWith(`${d.birthCountry}::`)
+    );
     const selectedBirthPlace = buildBirthPlace(d);
     const locationStatus = [
       birthLocationState.countriesLoading && "Loading all countries...",
@@ -760,13 +793,9 @@ function renderCreate() {
       <div class="form-row">
         <div class="form-group">
           <label for="birthCity">City of birth</label>
-          <select id="birthCity" name="birthCity" ${d.birthCountry ? "" : "disabled"} required>
-            ${cityOptionsHtml}
-          </select>
-        </div>
-        <div class="form-group${d.birthCity === OTHER_CITY_VALUE ? "" : " hidden"}" id="birth-city-other-wrap">
-          <label for="birthCityOther">Other birth city</label>
-          <input id="birthCityOther" name="birthCityOther" value="${esc(d.birthCityOther || "")}" placeholder="Type your birth city" />
+          <input id="birthCity" name="birthCity" list="birthCityOptions" value="${esc(d.birthCity || "")}" placeholder="Type at least 2 letters to search cities" ${d.birthCountry ? "" : "disabled"} required />
+          <datalist id="birthCityOptions">${cityOptionsHtml}</datalist>
+          <p style="font-size:0.72rem;color:var(--text-muted);margin-top:0.25rem">${cityLoading ? "Loading cities..." : "Type to search. You can enter any city name."}</p>
         </div>
       </div>
       ${locationStatus ? `<p style="font-size:0.76rem;color:var(--text-muted);margin:-0.4rem 0 0.75rem">${esc(locationStatus)}</p>` : ""}
@@ -841,8 +870,8 @@ function renderCreate() {
   if (wizardStep === 1) {
     bindBirthLocationSelectors();
     bindChartCalculator();
-    loadBirthCountries();
-    if (d.birthCountry) loadBirthCities(d.birthCountry);
+    loadBirthCountries(true);
+    if (d.birthCountry) loadBirthCities(d.birthCountry, d.birthCity || "");
   }
   document.getElementById("wizard-back")?.addEventListener("click", () => {
     collectWizardForm();
@@ -920,7 +949,7 @@ function clearCalculatedBirthFields() {
 function bindBirthLocationSelectors() {
   const country = document.getElementById("birthCountry");
   const city = document.getElementById("birthCity");
-  const cityOther = document.getElementById("birthCityOther");
+  let citySearchTimer;
   country?.addEventListener("change", () => {
     collectWizardForm();
     wizardDraft.birthCountry = country.value;
@@ -929,17 +958,58 @@ function bindBirthLocationSelectors() {
     clearCalculatedBirthFields();
     renderCreate();
   });
+  city?.addEventListener("input", () => {
+    clearTimeout(citySearchTimer);
+    wizardDraft.birthCity = city.value;
+    if (!wizardDraft.birthCountry) return;
+    const q = city.value.trim();
+    if (q.length >= 2) {
+      const cacheKey = `${wizardDraft.birthCountry}::${q.toLowerCase()}`;
+      birthLocationState.cityLoads.delete(cacheKey);
+      citySearchTimer = setTimeout(() => loadBirthCities(wizardDraft.birthCountry, q), 250);
+    }
+  });
   city?.addEventListener("change", () => {
     collectWizardForm();
     wizardDraft.birthCity = city.value;
-    if (city.value !== OTHER_CITY_VALUE) wizardDraft.birthCityOther = "";
     clearCalculatedBirthFields();
-    renderCreate();
+    rerenderCreateCosmicStep();
   });
-  cityOther?.addEventListener("change", () => {
-    collectWizardForm();
-    clearCalculatedBirthFields();
-    renderCreate();
+}
+
+function cosmicFieldsFromDraft(d) {
+  return {
+    birthDate: d.birthDate,
+    birthTime: d.birthTime,
+    birthCountry: d.birthCountry,
+    birthCity: d.birthCity,
+    birthCityOther: d.birthCityOther,
+    birthPlace: d.birthPlace || buildBirthPlace(d),
+    birthLatitude: d.birthLatitude != null && d.birthLatitude !== "" ? Number(d.birthLatitude) : undefined,
+    birthLongitude: d.birthLongitude != null && d.birthLongitude !== "" ? Number(d.birthLongitude) : undefined,
+    utcOffsetMinutes: d.utcOffsetMinutes != null && d.utcOffsetMinutes !== "" ? Number(d.utcOffsetMinutes) : undefined,
+    sunSign: d.sunSign,
+    moonSign: d.moonSign,
+    risingSign: d.risingSign,
+    zodiac: d.sunSign,
+    hdType: d.hdType,
+    hdAuthority: d.hdAuthority,
+    hdProfile: d.hdProfile,
+    humanDesignSource: d.humanDesignSource,
+    hdCalculationStatus: d.hdCalculationStatus,
+    chineseAnimal: d.chineseAnimal,
+    chineseElement: d.chineseElement,
+    age: calculateAge(d.birthDate, d.birthTime),
+  };
+}
+
+function persistCosmicDraft() {
+  const existing = getMyProfile();
+  if (!existing || !hasCalculatedChart(wizardDraft)) return;
+  const profile = { ...existing, ...cosmicFieldsFromDraft(wizardDraft) };
+  saveMyProfile(profile);
+  saveProfileToServer(profile).then((saved) => {
+    if (!saved) console.info("Cosmic data saved locally; server database unavailable.");
   });
 }
 
@@ -1000,8 +1070,14 @@ async function bindChartCalculator() {
         chart.moonSign && `☽ ${getZodiacById(chart.moonSign)?.name}`,
         chart.risingSign && `↑ ${getZodiacById(chart.risingSign)?.name}`,
         chart.chineseAnimal && `${getChineseById(chart.chineseAnimal)?.emoji} ${getChineseById(chart.chineseAnimal)?.name}`,
+        chart.humanDesign?.ok && (getHdTypeById(chart.humanDesign.type)?.name || chart.humanDesign.type),
       ].filter(Boolean);
-      if (status) status.textContent = `Calculated: ${parts.join(" · ")}`;
+      persistCosmicDraft();
+      if (status) {
+        status.textContent = parts.length
+          ? `Calculated: ${parts.join(" · ")}${getMyProfile() ? " · Saved to your profile" : ""}`
+          : "Calculation finished.";
+      }
       renderCreate();
     } catch (e) {
       if (status) status.textContent = e.message || "Chart failed. Use node serve.js (not file://).";
@@ -1179,6 +1255,7 @@ document.querySelector(".logo")?.addEventListener("click", (e) => {
 });
 
 initLanguageSwitcher(render);
+loadBirthCountries(true);
 render();
 syncProfilesFromServer().then((synced) => {
   if (synced) render();

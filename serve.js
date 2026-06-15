@@ -223,9 +223,15 @@ async function handleCountries() {
 async function handleCities(url) {
   const country = url.searchParams.get("country")?.trim();
   if (!country) return { status: 400, body: { error: "Missing country parameter", cities: [] } };
+  const query = url.searchParams.get("q")?.trim().toLowerCase() || "";
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 200), 1), 500);
   const locations = await fetchLocationIndex({ allowStale: true });
   const matchedCountry = locations.countries.find((item) => item.toLowerCase() === country.toLowerCase());
-  const cities = matchedCountry ? locations.citiesByCountry.get(matchedCountry) || [] : [];
+  let cities = matchedCountry ? locations.citiesByCountry.get(matchedCountry) || [] : [];
+  if (query) {
+    cities = cities.filter((city) => city.toLowerCase().includes(query));
+  }
+  cities = cities.slice(0, limit);
   return {
     status: 200,
     body: {
